@@ -131,47 +131,123 @@ int main(int argc, char * argv[])
     }
 
     // Create 
-    ofstream audit_output_file(audit_output_filename);
+    ofstream audit_output_file(audit_output_filename, 
+                               ofstream::out | ofstream::app);
+
+    time_t system_time;
+    tm * UTC_time;
 
     struct fanotify_event_metadata * events =
         (struct fanotify_event_metadata *) malloc(max_mem_bytes);
-    // TODO What is the behavior of read when the return is equal to the buffer size?    
     ssize_t num_bytes_read;
-    time_t current_time;
-    num_bytes_read = read(fanotify_fd, events, max_mem_bytes);
-    cout << "main(...): num_bytes_read == " << num_bytes_read << endl;
-    if (num_bytes_read == -1)
-    {
-        cerr << "diraudit: error reading from fanotify file descriptor" << endl;
-        exit(errno);
-    }
-    
-    
-    struct fanotify_event_metadata * event;
-    for (char * event_ptr = reinterpret_cast<char*>(events); 
-         event_ptr - reinterpret_cast<char*>(events) < num_bytes_read; 
-         event_ptr += reinterpret_cast
-                <struct fanotify_event_metadata*>(event_ptr)->event_len)
-    {
-        event = reinterpret_cast<struct fanotify_event_metadata*>(event_ptr);
 
+    // Loop until program is terminated externally
+    for (;;)
+    {
+        // TODO What is the behavior of read when the return is equal to the buffer size?    
+        num_bytes_read = read(fanotify_fd, events, max_mem_bytes);
+        cout << "main(...): num_bytes_read == " << num_bytes_read << endl;
 
-        cout << "pid == " << event->pid << endl;   
-//o Text file must contain
-// Timestamp
-// User
-// Process ID
-// Access Type
-        /*
-        struct fanotify_event_metadata {
-               __u32 event_len;
-               __u8 vers;
-               __u8 reserved;
-               __u16 metadata_len;
-               __aligned_u64 mask;
-               __s32 fd;
-               __s32 pid;
-           };
-        */
+        if (num_bytes_read == -1)
+        {
+            cerr << "diraudit: error reading from fanotify file descriptor" << endl;
+            exit(errno);
+        }
+        
+        struct fanotify_event_metadata * event;
+        // Iterate over the variably-sized event metadata structs   
+        // TODO FAN_EVENT_NEXT(meta, len)     
+        for (char * event_ptr = reinterpret_cast<char*>(events); 
+             event_ptr - reinterpret_cast<char*>(events) < num_bytes_read; 
+             event_ptr += reinterpret_cast
+                    <struct fanotify_event_metadata*>(event_ptr)->event_len)
+        {
+            event = reinterpret_cast<struct fanotify_event_metadata*>(event_ptr);
+            
+            system_time = time(0);
+            UTC_time = gmtime(&system_time);
+            string UTC_time_str(asctime(UTC_time));
+            // Remove trailing newline
+            UTC_time_str.erase(UTC_time_str.end()-1);
+            audit_output_file << UTC_time_str << ",";
+            
+            audit_output_file << event->pid << ",";
+            
+            // Create string of access types to file
+            string access_string = "(";
+            if (event->mask & FAN_ACCESS)
+            {
+                access_string += "FAN_ACCESS,";
+            }
+            if (event->mask & FAN_OPEN)
+            {
+                access_string += "FAN_OPEN,";
+            }
+            if (event->mask & FAN_MODIFY)
+            {
+                access_string += "FAN_MODIFY,";
+            }
+            if (event->mask & FAN_CLOSE_WRITE)
+            {
+                access_string += "FAN_CLOSE_WRITE,";
+            }
+            if (event->mask & FAN_CLOSE_NOWRITE)
+            {
+                access_string += "FAN_CLOSE_NOWRITE,";
+            }
+            if (event->mask & FAN_Q_OVERFLOW)
+            {
+                access_string += "FAN_Q_OVERFLOW,";
+            }
+            if (event->mask & FAN_ACCESS_PERM)
+            {
+                access_string += "FAN_ACCESS_PERM,";
+            }
+            if (event->mask & FAN_OPEN_PERM)
+            {
+                access_string += "FAN_OPEN_PERM,";
+            }
+            if (event->mask & FAN_CLOSE_NOWRITE)
+            {
+                access_string += "FAN_CLOSE_NOWRITE,";
+            }
+            if (event->mask & FAN_CLOSE_NOWRITE)
+            {
+                access_string += "FAN_CLOSE_NOWRITE,";
+            }
+
+            if (access_string[access_string.length()-1] == ',')
+            {
+                access_string[access_string.length()-1] = ')';
+            }
+            else
+            {
+                access_string += ")";
+            }
+            access_string += ",";
+            
+            audit_output_file << access_string;
+
+            audit_output_file << endl;
+            
+            audit_output_file.flush();
+    //o Text file must contain
+    // Timestamp
+    // User
+    // Process ID
+    // Access Type
+            /*
+            struct fanotify_event_metadata {
+                   __u32 event_len;
+                   __u8 vers;
+                   __u8 reserved;
+                   __u16 metadata_len;
+                   __aligned_u64 mask;
+                   __s32 fd;
+                   __s32 pid;
+               };
+            */
+        }
     }
+    audit_output_file.close();
 }
