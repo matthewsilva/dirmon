@@ -26,9 +26,15 @@ Include any notes or thoughts on the project
 
 */
 
+// TODO cron ?
+// TODO install dirmon binary in $PATH ?
 
 #include <bits/stdc++.h> 
+#include <ctime>
+#include <fcntl.h>
+#include <fstream>
 #include <iostream>
+#include <sys/fanotify.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -43,16 +49,18 @@ int main(int argc, char * argv[])
 {
     
     // Ensure we have the csv file argument
-    if (argc < 2)
+    if (argc < 3)
     {
         cerr << "diraudit: missing csv file operand" << endl;
-        cerr << "Usage: diraudit [OPTION]... DIRECTORY_LIST_FILE" << endl;
+        cerr << "Usage: diraudit [OPTION]... DIRECTORY_LIST_FILE AUDIT_OUTPUT_FILENAME" << endl;
         exit(1);
     }
 
-    // Open the csv file containing the list of directories
     string dir_list_filename(argv[1]);
+    string audit_output_filename(argv[2]);
 
+    // Open the csv file containing the list of directories
+    
     // Check if the dir list file exists using portable boost call
     if (!boost::filesystem::exists(dir_list_filename))
     {
@@ -84,55 +92,86 @@ int main(int argc, char * argv[])
     }
 
     // Try to initialize inotify
-    int inotify_fd = inotify_init();
-    if (inotify_fd == -1)
+    // Set fanotify to give notifications on both accesses & attempted accesses    
+    unsigned int monitoring_flags = FAN_CLASS_CONTENT;
+    // Set event file to read-only and allow large files
+    unsigned int event_flags = O_RDONLY;// TODO || O_LARGEFILE;
+    int fanotify_fd = fanotify_init(monitoring_flags, event_flags);
+    if (fanotify_fd == -1)
     {
-        cerr << "diraudit: cannot initialize inotify file descriptor, errno:" << errno << endl;
+        cerr << "diraudit: cannot initialize fanotify file descriptor, errno:" << errno << endl;
         exit(errno);
     }
-
-    // Add a watch for each directory and save the watch descriptors in a vector
-    map<string,int> watch_descriptors;
-    int watch_descriptor;
+    
+    // Mark each directory and save the mark descriptors    
+    map<string,int> mark_descriptors;
+    int mark_descriptor;
+    // TODO FAN_MARK_ONLYDIR 
+    unsigned int mark_flags = FAN_MARK_ADD;// | FAN_MARK_ONLYDIR;
+    uint64_t event_types_mask = FAN_ACCESS | FAN_MODIFY; /*|
+                                FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
+                                FAN_OPEN | FAN_Q_OVERFLOW |
+                                FAN_OPEN_PERM | FAN_ACCESS_PERM |
+                                FAN_ONDIR;*/
+    // Pass in -1 for directory file descriptor because we expect
+    // absolute pathnames
+    int directory_fd = -1;
     for (int i = 0; i < directory_names.size(); i++)
     {
-        watch_descriptor = inotify_add_watch(inotify_fd, 
-                                             directory_names[i].c_str(),
-                                             IN_ALL_EVENTS);
-        if (watch_descriptor == -1)
+        // Mark the directory for viewing
+        if (fanotify_mark(fanotify_fd, mark_flags,
+                          event_types_mask,
+                          directory_fd,
+                          directory_names[i].c_str()) == -1)
         {
             cerr << "diraudit: cannot add watch at pathname '" 
                  << directory_names[i] << "'; (errno: "<<errno<<"); skipping directory..." << endl;
         }
-        else
-        {
-            watch_descriptors[directory_names[i]] = watch_descriptor;
-        }
+    //    watch_descriptors[directory_names[i]] = watch_descriptor;
     }
-// TODO IN_ONLYDIR
 
-    struct inotify_event * events = (struct inotify_event *) malloc(max_mem_bytes);
-    ssize_t num_bytes_read = read(inotify_fd, events, max_mem_bytes);
+    // Create 
+    ofstream audit_output_file(audit_output_filename);
+
+    struct fanotify_event_metadata * events =
+        (struct fanotify_event_metadata *) malloc(max_mem_bytes);
+    // TODO What is the behavior of read when the return is equal to the buffer size?    
+    ssize_t num_bytes_read;
+    time_t current_time;
+    num_bytes_read = read(fanotify_fd, events, max_mem_bytes);
     cout << "main(...): num_bytes_read == " << num_bytes_read << endl;
     if (num_bytes_read == -1)
     {
-        cerr << "diraudit: error reading from inotify file descriptor" << endl;
+        cerr << "diraudit: error reading from fanotify file descriptor" << endl;
         exit(errno);
     }
-    unsigned num_events_read = num_bytes_read / sizeof(struct inotify_event);
-
-    //ofstream
-
-    for (int i = 0; i < num_events_read; i++)
+    
+    
+    struct fanotify_event_metadata * event;
+    for (char * event_ptr = reinterpret_cast<char*>(events); 
+         event_ptr - reinterpret_cast<char*>(events) < num_bytes_read; 
+         event_ptr += reinterpret_cast
+                <struct fanotify_event_metadata*>(event_ptr)->event_len)
     {
-        
-        struct inotify_event {
-               int      wd;       /* Watch descriptor */
-               uint32_t mask;     /* Mask describing event */
-               uint32_t cookie;   /* Unique cookie associating related
-                                     events (for rename(2)) */
-               uint32_t len;      /* Size of name field */
-               char     name[];   /* Optional null-terminated name */
+        event = reinterpret_cast<struct fanotify_event_metadata*>(event_ptr);
+
+
+        cout << "pid == " << event->pid << endl;   
+//o Text file must contain
+// Timestamp
+// User
+// Process ID
+// Access Type
+        /*
+        struct fanotify_event_metadata {
+               __u32 event_len;
+               __u8 vers;
+               __u8 reserved;
+               __u16 metadata_len;
+               __aligned_u64 mask;
+               __s32 fd;
+               __s32 pid;
            };
+        */
     }
 }
