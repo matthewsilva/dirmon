@@ -34,6 +34,7 @@ Include any notes or thoughts on the project
 #include <fcntl.h>
 #include <fstream>
 #include <iostream>
+#include <proc/readproc.h>
 #include <sys/fanotify.h>
 #include <sys/inotify.h>
 #include <sys/stat.h>
@@ -137,9 +138,14 @@ int main(int argc, char * argv[])
     time_t system_time;
     tm * UTC_time;
 
+    // Create buffer for reading events
     struct fanotify_event_metadata * events =
         (struct fanotify_event_metadata *) malloc(max_mem_bytes);
+    
     ssize_t num_bytes_read;
+    proc_t process_info;
+    PROCTAB * proc_tab;
+    
 
     // Loop until program is terminated externally
     for (;;)
@@ -164,6 +170,7 @@ int main(int argc, char * argv[])
         {
             event = reinterpret_cast<struct fanotify_event_metadata*>(event_ptr);
             
+            // Get the time and date in UTC and add it to the audit file
             system_time = time(0);
             UTC_time = gmtime(&system_time);
             string UTC_time_str(asctime(UTC_time));
@@ -171,52 +178,77 @@ int main(int argc, char * argv[])
             UTC_time_str.erase(UTC_time_str.end()-1);
             audit_output_file << UTC_time_str << ",";
             
+            // Get the username of the process and add it to the audit file
+            // We want to get the info from /proc/#pid/status and resolve
+            // the UIDs to usernames, but only do these ops for a specific PID  
+            int proc_flags = PROC_FILLSTATUS | PROC_FILLUSR | PROC_PID;
+            // Create NULL-terminated pid list            
+            pid_t pid_list[2];
+            pid_list[0] = event->pid;
+            pid_list[1] = 0;
+            proc_tab = openproc(proc_flags, pid_list);
+            
+            // TODO see man readproc, don't want to alloc/free all the time
+            //proc_t * found = (proc_t*) malloc(1024*sizeof(proc_t));
+            proc_t * found = readproc(proc_tab, NULL);
+            if (found)
+            {
+                audit_output_file << found->ruser << ",";
+                freeproc(found);   // TODO see man readproc, don't want to alloc/free all the time 
+            }
+            else
+            {
+                audit_output_file << "DEAD_PROCESS" << "," << endl;
+            } 
+            
+            // Put the pid of the accessing process into the audit file
             audit_output_file << event->pid << ",";
             
             // Create string of access types to file
+            // TODO break out into a function that takes a mask & rets a string
             string access_string = "(";
             if (event->mask & FAN_ACCESS)
             {
-                access_string += "FAN_ACCESS,";
+                access_string += "FAN_ACCESS;";
             }
             if (event->mask & FAN_OPEN)
             {
-                access_string += "FAN_OPEN,";
+                access_string += "FAN_OPEN;";
             }
             if (event->mask & FAN_MODIFY)
             {
-                access_string += "FAN_MODIFY,";
+                access_string += "FAN_MODIFY;";
             }
             if (event->mask & FAN_CLOSE_WRITE)
             {
-                access_string += "FAN_CLOSE_WRITE,";
+                access_string += "FAN_CLOSE_WRITE;";
             }
             if (event->mask & FAN_CLOSE_NOWRITE)
             {
-                access_string += "FAN_CLOSE_NOWRITE,";
+                access_string += "FAN_CLOSE_NOWRITE;";
             }
             if (event->mask & FAN_Q_OVERFLOW)
             {
-                access_string += "FAN_Q_OVERFLOW,";
+                access_string += "FAN_Q_OVERFLOW;";
             }
             if (event->mask & FAN_ACCESS_PERM)
             {
-                access_string += "FAN_ACCESS_PERM,";
+                access_string += "FAN_ACCESS_PERM;";
             }
             if (event->mask & FAN_OPEN_PERM)
             {
-                access_string += "FAN_OPEN_PERM,";
+                access_string += "FAN_OPEN_PERM;";
             }
             if (event->mask & FAN_CLOSE_NOWRITE)
             {
-                access_string += "FAN_CLOSE_NOWRITE,";
+                access_string += "FAN_CLOSE_NOWRITE;";
             }
             if (event->mask & FAN_CLOSE_NOWRITE)
             {
-                access_string += "FAN_CLOSE_NOWRITE,";
+                access_string += "FAN_CLOSE_NOWRITE;";
             }
 
-            if (access_string[access_string.length()-1] == ',')
+            if (access_string[access_string.length()-1] == ';')
             {
                 access_string[access_string.length()-1] = ')';
             }
@@ -224,9 +256,8 @@ int main(int argc, char * argv[])
             {
                 access_string += ")";
             }
-            access_string += ",";
             
-            audit_output_file << access_string;
+            audit_output_file << access_string << ",";
 
             audit_output_file << endl;
             
