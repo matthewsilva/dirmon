@@ -55,8 +55,8 @@ int main(int argc, char * argv[])
         cerr << "diraudit: missing csv file operand" << endl;
         cerr << "Usage: diraudit [OPTION]... DIRECTORY_LIST_FILE AUDIT_OUTPUT_FILENAME" << endl;
         exit(1);
-    }
-
+    }    
+    
     string dir_list_filename(argv[1]);
     string audit_output_filename(argv[2]);
 
@@ -105,20 +105,23 @@ int main(int argc, char * argv[])
     }
     
     // Mark each directory and save the mark descriptors    
-    map<string,int> mark_descriptors;
+    map<string,int> mark_descriptors; // TODO Note: Wanted to use a map here to match file descriptors to filenames, but it would be tough due to the nature of fanotify_mark
     int mark_descriptor;
     // TODO FAN_MARK_ONLYDIR 
     unsigned int mark_flags = FAN_MARK_ADD;// | FAN_MARK_ONLYDIR;
     uint64_t event_types_mask = FAN_ACCESS | FAN_MODIFY |
                                 FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
                                 FAN_OPEN | // TODO FAN_Q_OVERFLOW |
-                                FAN_OPEN_PERM | FAN_ACCESS_PERM;// |
-                                // TODO FAN_ONDIR;
+                                FAN_OPEN_PERM | FAN_ACCESS_PERM |
+                                FAN_ONDIR | FAN_EVENT_ON_CHILD;
     // Pass in -1 for directory file descriptor because we expect
     // absolute pathnames
     int directory_fd = -1;
     for (int i = 0; i < directory_names.size(); i++)
     {
+        // TODO A possible vulnerability is that the marks never get rebuilt,
+                // so we could be blind to newly created directories inside
+                // marked directories
         // Mark the directory for viewing
         if (fanotify_mark(fanotify_fd, mark_flags,
                           event_types_mask,
@@ -182,7 +185,7 @@ int main(int argc, char * argv[])
             // We want to get the info from /proc/#pid/status and resolve
             // the UIDs to usernames, but only do these ops for a specific PID  
             int proc_flags = PROC_FILLSTATUS | PROC_FILLUSR | PROC_PID;
-            // Create NULL-terminated pid list            
+            // Create 0-terminated pid list            
             pid_t pid_list[2];
             pid_list[0] = event->pid;
             pid_list[1] = 0;
