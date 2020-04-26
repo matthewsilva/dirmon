@@ -49,7 +49,7 @@ const size_t max_mem_bytes = 4096;
 int main(int argc, char * argv[])
 {
     
-    // Ensure we have the csv file argument
+    // Ensure we have the required arguments
     if (argc < 3)
     {
         cerr << "diraudit: missing csv file operand" << endl;
@@ -96,7 +96,7 @@ int main(int argc, char * argv[])
     // Set fanotify to give notifications on both accesses & attempted accesses    
     unsigned int monitoring_flags = FAN_CLASS_CONTENT;
     // Set event file to read-only and allow large files
-    unsigned int event_flags = O_RDONLY;// TODO || O_LARGEFILE;
+    unsigned int event_flags = O_RDONLY;// TODO | O_LARGEFILE;
     int fanotify_fd = fanotify_init(monitoring_flags, event_flags);
     if (fanotify_fd == -1)
     {
@@ -109,11 +109,11 @@ int main(int argc, char * argv[])
     int mark_descriptor;
     // TODO FAN_MARK_ONLYDIR 
     unsigned int mark_flags = FAN_MARK_ADD;// | FAN_MARK_ONLYDIR;
-    uint64_t event_types_mask = FAN_ACCESS | FAN_MODIFY; /*|
+    uint64_t event_types_mask = FAN_ACCESS | FAN_MODIFY |
                                 FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
-                                FAN_OPEN | FAN_Q_OVERFLOW |
-                                FAN_OPEN_PERM | FAN_ACCESS_PERM |
-                                FAN_ONDIR;*/
+                                FAN_OPEN | // TODO FAN_Q_OVERFLOW |
+                                FAN_OPEN_PERM | FAN_ACCESS_PERM;// |
+                                // TODO FAN_ONDIR;
     // Pass in -1 for directory file descriptor because we expect
     // absolute pathnames
     int directory_fd = -1;
@@ -141,11 +141,11 @@ int main(int argc, char * argv[])
     // Create buffer for reading events
     struct fanotify_event_metadata * events =
         (struct fanotify_event_metadata *) malloc(max_mem_bytes);
-    
+    struct fanotify_response permission_event_response;
+
     ssize_t num_bytes_read;
     proc_t process_info;
     PROCTAB * proc_tab;
-    
 
     // Loop until program is terminated externally
     for (;;)
@@ -234,20 +234,27 @@ int main(int argc, char * argv[])
             if (event->mask & FAN_ACCESS_PERM)
             {
                 access_string += "FAN_ACCESS_PERM;";
+                permission_event_response.fd = event->fd;
+                // TODO create option to map directories to yes/no access
+                //if (
+                permission_event_response.response = FAN_ALLOW;
+                write (fanotify_fd,  
+                       &permission_event_response,
+                       sizeof(struct fanotify_response));
             }
             if (event->mask & FAN_OPEN_PERM)
             {
-                access_string += "FAN_OPEN_PERM;";
-            }
-            if (event->mask & FAN_CLOSE_NOWRITE)
-            {
-                access_string += "FAN_CLOSE_NOWRITE;";
-            }
-            if (event->mask & FAN_CLOSE_NOWRITE)
-            {
-                access_string += "FAN_CLOSE_NOWRITE;";
+                access_string += "FAN_OPEN_PERM;";                
+                permission_event_response.fd = event->fd;
+                // TODO create option to map directories to yes/no access
+                //if (
+                permission_event_response.response = FAN_ALLOW;
+                write (fanotify_fd,  
+                       &permission_event_response,
+                       sizeof(struct fanotify_response));
             }
 
+            // Remove terminating semicolon if needed, then add closing parens
             if (access_string[access_string.length()-1] == ';')
             {
                 access_string[access_string.length()-1] = ')';
@@ -280,5 +287,7 @@ int main(int argc, char * argv[])
             */
         }
     }
+    // TODO Add these to the signal handler for closing the program
+    close(fanotify_fd);
     audit_output_file.close();
 }
