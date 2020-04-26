@@ -114,18 +114,17 @@ int main(int argc, char * argv[])
                                 FAN_OPEN | // TODO FAN_Q_OVERFLOW |
                                 FAN_OPEN_PERM | FAN_ACCESS_PERM |
                                 FAN_ONDIR | FAN_EVENT_ON_CHILD;
-    // Pass in -1 for directory file descriptor because we expect
-    // absolute pathnames
-    int directory_fd = -1;
     for (int i = 0; i < directory_names.size(); i++)
     {
         // TODO A possible vulnerability is that the marks never get rebuilt,
                 // so we could be blind to newly created directories inside
                 // marked directories
         // Mark the directory for viewing
+        // (Pass in -1 for directory file descriptor because we expect
+        // absolute pathnames)
         if (fanotify_mark(fanotify_fd, mark_flags,
                           event_types_mask,
-                          directory_fd,
+                          -1,
                           directory_names[i].c_str()) == -1)
         {
             cerr << "diraudit: cannot add watch at pathname '" 
@@ -134,7 +133,7 @@ int main(int argc, char * argv[])
     //    watch_descriptors[directory_names[i]] = watch_descriptor;
     }
 
-    // Create 
+    // Create or append to given output file
     ofstream audit_output_file(audit_output_filename, 
                                ofstream::out | ofstream::app);
 
@@ -145,6 +144,9 @@ int main(int argc, char * argv[])
     struct fanotify_event_metadata * events =
         (struct fanotify_event_metadata *) malloc(max_mem_bytes);
     struct fanotify_response permission_event_response;
+
+    // Buffer for retrieving the filepaths of accessed files later
+    char filepath[1024];
 
     ssize_t num_bytes_read;
     proc_t process_info;
@@ -173,6 +175,18 @@ int main(int argc, char * argv[])
         {
             event = reinterpret_cast<struct fanotify_event_metadata*>(event_ptr);
             
+            // Get the filename of the file descriptor accessed
+            string fd_path = "/proc/self/fd/";
+            fd_path += to_string(event->fd);
+            if (readlink(fd_path.c_str(), filepath, sizeof(filepath)) != -1)
+            {
+                audit_output_file << filepath << ",";
+            }
+            else
+            {
+                audit_output_file << "FILE_NOT_FOUND" << ",";
+            }
+
             // Get the time and date in UTC and add it to the audit file
             system_time = time(0);
             UTC_time = gmtime(&system_time);
@@ -241,7 +255,7 @@ int main(int argc, char * argv[])
                 // TODO create option to map directories to yes/no access
                 //if (
                 permission_event_response.response = FAN_ALLOW;
-                write (fanotify_fd,  
+                write (fanotify_fd,
                        &permission_event_response,
                        sizeof(struct fanotify_response));
             }
