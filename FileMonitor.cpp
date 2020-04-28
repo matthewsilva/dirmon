@@ -179,11 +179,11 @@ int main(int argc, char * argv[])
         }
         cout << "main(...): Marking " << directory_name << endl;
         // Mark the mounted directory for monitoring
-        // (Pass in -1 for directory file descriptor because we expect
-        // absolute pathnames)
+        // (Pass in AT_FDCWD for directory file descriptor so that we can
+        //  use relative pathnames if desired)
         if (fanotify_mark(fanotify_fd, mark_flags,
                           event_types_mask,
-                          -1,
+                          AT_FDCWD,
                           //directory_names[i].c_str()) == -1)
                           directory_name.c_str()) == -1)
         {
@@ -199,7 +199,7 @@ int main(int argc, char * argv[])
     // output file 
     if (fanotify_mark(fanotify_fd, FAN_MARK_ADD | FAN_MARK_IGNORED_MASK,
                       event_types_mask,
-                      -1,
+                      AT_FDCWD,
                       //directory_names[i].c_str()) == -1)
                       audit_output_filename.c_str()) == -1)
     {
@@ -264,7 +264,8 @@ int main(int argc, char * argv[])
             { 
                 close(event->fd);
                 continue; 
-            }            
+            }
+
             // Get the filename of the file descriptor accessed
             string fd_path = "/proc/self/fd/";
             fd_path += to_string(event->fd);
@@ -402,7 +403,7 @@ int main(int argc, char * argv[])
 /*
 struct fanotify_event_metadata {
                    __u32 event_len;
-                   __u8 vers;
+                   __u8 vers; // TODO check vers?
                    __u8 reserved;
                    __u16 metadata_len;
                    __aligned_u64 mask;
