@@ -192,12 +192,11 @@ int main(int argc, char * argv[])
                  << directory_name << "'; (errno: "<<errno<<"); skipping directory..." << endl;
         }
     }
-    /*
+    
     // Specifically ignore events for the output file as to avoid
     // rapidly generating an infinite number of modify events if
     // the user wants to monitor the directory containing their 
-    // output file TODO maybe just drop events depending on their pid, as in,
-    // drop events with the same pid as this process
+    // output file 
     if (fanotify_mark(fanotify_fd, FAN_MARK_ADD | FAN_MARK_IGNORED_MASK,
                       event_types_mask,
                       -1,
@@ -207,8 +206,8 @@ int main(int argc, char * argv[])
         cerr << "diraudit: cannot unmark audit output file '" 
              //<< directory_names[i] << "'; (errno: "<<errno<<"); skipping directory..." << endl;
              << audit_output_filename << "'; (errno: "<<errno<<")" << endl;
-    }*/
-
+    }
+    
     // ---- END DirectoryMonitorCreator
 
 
@@ -256,7 +255,7 @@ int main(int argc, char * argv[])
                     <struct fanotify_event_metadata*>(event_ptr)->event_len)
         {
             event = reinterpret_cast<struct fanotify_event_metadata*>(event_ptr);
-            // TODO probably remove below for ignore-mask based method
+            
             // If we have the same PID as the editing process, it means
             // we should skip this event, and write nothing to the audit
             // file (if we write to the audit file, it will cause an infinite
