@@ -43,8 +43,6 @@ Include any notes or thoughts on the project
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "boost/filesystem.hpp"
-
 using namespace std;
 
 const size_t max_mem_bytes = 4096;
@@ -115,25 +113,31 @@ int main(int argc, char * argv[])
         exit(errno);
     }
 
-    // Open the csv file containing the list of directories
-    
-    // Check if the dir list file exists using portable boost call
-    if (!boost::filesystem::exists(dir_list_filename))
+    // Open the directory list file strictly to see if it exists
+    int dir_list_fd = open(dir_list_filename.c_str(), O_PATH);
+    if(dir_list_fd == -1)
     {
-        cerr << "diraudit: cannot open '" 
-             << dir_list_filename << "': No such file" << endl;        
-        exit(2);
+        // TODO Could check for errno either EACCESS or ENOENT to differentiate
+        //      between bad permissions and nonexistent file
+        cerr << "diraudit: cannot open directory list file '" 
+             << dir_list_filename << "'; errno: '" << errno 
+             << "'; No such file" << endl;        
+        exit(errno);
+    }
+    else
+    {
+        close(dir_list_fd);
     }
     
+    // Open the file containing the list of directories
     fstream dir_list_file;
     dir_list_file.open(dir_list_filename, ios::in);
-
     // If the file exists, but is not open, that must mean that the 
     // file exists but we are unable to access it, probably due to 
     // bad permissions
     if (!dir_list_file.is_open())
     {
-        cerr << "diraudit: cannot open '" 
+        cerr << "diraudit: cannot open directory list file '" 
              << dir_list_filename << "': Unable to open file (bad permissions)" << endl;
         exit(3);
     }
