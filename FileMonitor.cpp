@@ -35,9 +35,12 @@ Include any notes or thoughts on the project
 #include <fstream>
 #include <iostream>
 #include <proc/readproc.h>
+#include <signal.h>
 #include <sys/fanotify.h>
 #include <sys/inotify.h>
+#include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
 #include "boost/filesystem.hpp"
@@ -46,9 +49,42 @@ using namespace std;
 
 const size_t max_mem_bytes = 4096;
 
+map<string,string> mount_map;
+int fanotify_fd;
+ofstream audit_output_file;
+
+void signal_handler(int signal_number) {
+    cout << "dirmon: Ending gracefully due to signal (" 
+         << signal_number << ")" << endl;
+    close(fanotify_fd);
+    audit_output_file.close();
+    for (auto pair = mount_map.begin(); pair != mount_map.end(); pair++)
+    //for (int i = 0; i < directory_names.size(); i++)
+    {
+        
+        cout << "signal_handler(...): Unmounting directory '" 
+             << pair->first << "'" << endl;
+        if (umount(pair->first.c_str()) == -1)
+        {
+            cerr << "diraudit: cannot unmount directory '" << pair->first
+                 << "', errno:" << strerror(errno) << endl;
+        }
+        cout << "signal_handler(...): Removing directory '" 
+             << pair->first << "'" << endl;
+        if (rmdir(pair->first.c_str()) == -1)
+        {
+            cerr << "diraudit: cannot remove directory '" << pair->first
+                 << "', errno:" << strerror(errno) << endl;
+        }
+    }
+    rmdir("/tmp/dirmon");
+    exit(signal_number);
+}
+
 int main(int argc, char * argv[])
 {
-    
+    // TODO add options to set which things get recorded
+
     // Ensure we have the required arguments
     if (argc < 3)
     {
@@ -56,9 +92,12 @@ int main(int argc, char * argv[])
         cerr << "Usage: diraudit [OPTION]... DIRECTORY_LIST_FILE AUDIT_OUTPUT_FILENAME" << endl;
         exit(1);
     }    
-    
+
     string dir_list_filename(argv[1]);
     string audit_output_filename(argv[2]);
+
+    // Create a signal handler to catch an interrupt signal     
+    signal(SIGINT, signal_handler);
 
     // Open the csv file containing the list of directories
     
@@ -92,12 +131,56 @@ int main(int argc, char * argv[])
         directory_names.push_back(directory_name);
     }
 
+    
+    if(mkdir("/tmp/dirmon", 777) == -1)// TODO set permissions correctly
+    {
+        // We only care about the error if it's not a
+        // preexisting directory error 
+        if (errno != EEXIST)
+        {
+            cerr << "diraudit: cannot mkdir /tmp/dirmon, errno:" << errno << endl;
+            exit(errno);  
+        }
+    }
+    // fanotify requires that recursively monitored directories be mount points
+    // Map of mount directory names to real directory names
+    for (int i = 0; i < directory_names.size(); i++)
+    {
+        // TODO Map mount_directories to full paths
+        string mount_directory = "/tmp/dirmon";
+        size_t last_slash = directory_names[i].find_last_of("/");
+        mount_directory += directory_names[i].substr(last_slash);
+        if (mkdir(mount_directory.c_str(), 777) == -1) // TODO set permissions correctly        
+        {
+            // We only care about the error if it's not a
+            // preexisting directory error 
+            if (errno != EEXIST)
+            {
+                cerr << "diraudit: cannot mkdir /tmp/dirmon, errno:" << errno << endl;
+                exit(errno);  
+            }
+        }
+        cout << "main(...): Mounting directory '" 
+             << directory_names[i] << "' as '"
+             << mount_directory << "'" << endl; 
+        // TODO fix ext4
+        if (mount(directory_names[i].c_str(), mount_directory.c_str(), 
+                  "", MS_BIND, "") == -1)
+        {
+            cerr << "diraudit: cannot mount directory '" << directory_names[i]
+                 << "'for monitoring, errno:" << strerror(errno) << endl;
+            exit(errno);
+        }
+        cout << "main(...): Adding pair (" << mount_directory << "," << directory_names[i] << ") to map" << endl;
+        mount_map[mount_directory] = directory_names[i];
+    }
+
     // Try to initialize inotify
     // Set fanotify to give notifications on both accesses & attempted accesses    
     unsigned int monitoring_flags = FAN_CLASS_CONTENT;
     // Set event file to read-only and allow large files
-    unsigned int event_flags = O_RDONLY;// TODO | O_LARGEFILE;
-    int fanotify_fd = fanotify_init(monitoring_flags, event_flags);
+    unsigned int event_flags = O_RDONLY;// | O_LARGEFILE;
+    fanotify_fd = fanotify_init(monitoring_flags, event_flags);
     if (fanotify_fd == -1)
     {
         cerr << "diraudit: cannot initialize fanotify file descriptor, errno:" << errno << endl;
@@ -108,33 +191,40 @@ int main(int argc, char * argv[])
     map<string,int> mark_descriptors; // TODO Note: Wanted to use a map here to match file descriptors to filenames, but it would be tough due to the nature of fanotify_mark
     int mark_descriptor;
     // TODO FAN_MARK_ONLYDIR 
-    unsigned int mark_flags = FAN_MARK_ADD;// | FAN_MARK_ONLYDIR;
+    unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_MOUNT;
+    // TODO if (recursive_flag == true)
+    // mark_flags |= FAN_MARK_MOUNT;
     uint64_t event_types_mask = FAN_ACCESS | FAN_MODIFY |
                                 FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
                                 FAN_OPEN | // TODO FAN_Q_OVERFLOW |
-                                FAN_OPEN_PERM | FAN_ACCESS_PERM |
+                                //FAN_OPEN_PERM | FAN_ACCESS_PERM |
                                 FAN_ONDIR | FAN_EVENT_ON_CHILD;
-    for (int i = 0; i < directory_names.size(); i++)
+    for (auto pair = mount_map.begin(); pair != mount_map.end(); pair++)
+    //for (int i = 0; i < directory_names.size(); i++)
     {
+        
         // TODO A possible vulnerability is that the marks never get rebuilt,
                 // so we could be blind to newly created directories inside
                 // marked directories
-        // Mark the directory for viewing
+        // Mark the mounted directory (in /tmp/dirmon/) for viewing
         // (Pass in -1 for directory file descriptor because we expect
         // absolute pathnames)
+        //cout << "main(...): Marking " << directory_names[i] << endl;
+        cout << "main(...): Marking " << pair->first << endl;
         if (fanotify_mark(fanotify_fd, mark_flags,
                           event_types_mask,
                           -1,
-                          directory_names[i].c_str()) == -1)
+                          //directory_names[i].c_str()) == -1)
+                          pair->first.c_str()) == -1)
         {
-            cerr << "diraudit: cannot add watch at pathname '" 
-                 << directory_names[i] << "'; (errno: "<<errno<<"); skipping directory..." << endl;
+            cerr << "diraudit: cannot mark pathname '" 
+                 //<< directory_names[i] << "'; (errno: "<<errno<<"); skipping directory..." << endl;
+                 << pair->first << "'; (errno: "<<errno<<"); skipping directory..." << endl;
         }
-    //    watch_descriptors[directory_names[i]] = watch_descriptor;
     }
 
     // Create or append to given output file
-    ofstream audit_output_file(audit_output_filename, 
+    audit_output_file = ofstream(audit_output_filename, 
                                ofstream::out | ofstream::app);
 
     time_t system_time;
@@ -174,13 +264,16 @@ int main(int argc, char * argv[])
                     <struct fanotify_event_metadata*>(event_ptr)->event_len)
         {
             event = reinterpret_cast<struct fanotify_event_metadata*>(event_ptr);
-            
             // Get the filename of the file descriptor accessed
             string fd_path = "/proc/self/fd/";
             fd_path += to_string(event->fd);
-            if (readlink(fd_path.c_str(), filepath, sizeof(filepath)) != -1)
+            cout << "main(...): event->fd == " << event->fd << endl;
+            size_t num_chars_retrieved = readlink(fd_path.c_str(), filepath, sizeof(filepath)-1);            
+            if (num_chars_retrieved != -1)
             {
+                filepath[num_chars_retrieved] = '\0';
                 audit_output_file << filepath << ",";
+                close(event->fd);
             }
             else
             {
@@ -215,13 +308,18 @@ int main(int argc, char * argv[])
             }
             else
             {
-                audit_output_file << "DEAD_PROCESS" << "," << endl;
+                audit_output_file << "CANNOT_FIND_USER_DEAD_PROCESS" << ",";
             } 
             
             // Put the pid of the accessing process into the audit file
             audit_output_file << event->pid << ",";
             
             // Create string of access types to file
+            // TODO maybe move this into separate for loop above to prevent
+                    // deadlock in case the user wants to monitory a file tree
+                    // containing the monitoring software, but also, we 
+                    // should consider that we should never mark the 
+                    // output file...
             // TODO break out into a function that takes a mask & rets a string
             string access_string = "(";
             if (event->mask & FAN_ACCESS)
@@ -286,13 +384,22 @@ int main(int argc, char * argv[])
             audit_output_file << endl;
             
             audit_output_file.flush();
+
     //o Text file must contain
     // Timestamp
     // User
     // Process ID
     // Access Type
-            /*
-            struct fanotify_event_metadata {
+            
+            
+           
+        }
+        
+    }
+    
+}
+/*
+struct fanotify_event_metadata {
                    __u32 event_len;
                    __u8 vers;
                    __u8 reserved;
@@ -301,10 +408,4 @@ int main(int argc, char * argv[])
                    __s32 fd;
                    __s32 pid;
                };
-            */
-        }
-    }
-    // TODO Add these to the signal handler for closing the program
-    close(fanotify_fd);
-    audit_output_file.close();
-}
+*/
