@@ -49,35 +49,33 @@ using namespace std;
 
 const size_t max_mem_bytes = 4096;
 
-map<string,string> mount_map;
 int fanotify_fd;
 ofstream audit_output_file;
+set<string> monitored_directories;
 
 void signal_handler(int signal_number) {
     cout << "dirmon: Ending gracefully due to signal (" 
          << signal_number << ")" << endl;
     close(fanotify_fd);
     audit_output_file.close();
-    for (auto pair = mount_map.begin(); pair != mount_map.end(); pair++)
+    for (auto monitored_directory = monitored_directories.begin();
+              monitored_directory != monitored_directories.end(); 
+              monitored_directory++)
     //for (int i = 0; i < directory_names.size(); i++)
     {
         
         cout << "signal_handler(...): Unmounting directory '" 
-             << pair->first << "'" << endl;
-        if (umount(pair->first.c_str()) == -1)
+             << *monitored_directory << "'" << endl;
+        // Use the MNT_DETACH flag because the monitored directories
+        // are likely in usage frequently, and we should wait until
+        // they are not in use to unmount them 
+        if (umount2(monitored_directory->c_str(), MNT_DETACH) == -1)
         {
-            cerr << "diraudit: cannot unmount directory '" << pair->first
-                 << "', errno:" << strerror(errno) << endl;
-        }
-        cout << "signal_handler(...): Removing directory '" 
-             << pair->first << "'" << endl;
-        if (rmdir(pair->first.c_str()) == -1)
-        {
-            cerr << "diraudit: cannot remove directory '" << pair->first
+            cerr << "diraudit: cannot unmount directory '" << *monitored_directory
                  << "', errno:" << strerror(errno) << endl;
         }
     }
-    rmdir("/tmp/dirmon");
+    cout << "dirmon: Done with post-signal cleanup, exiting..." << endl;
     exit(signal_number);
 }
 
@@ -97,7 +95,23 @@ int main(int argc, char * argv[])
     string audit_output_filename(argv[2]);
 
     // Create a signal handler to catch an interrupt signal     
-    signal(SIGINT, signal_handler);
+    signal(SIGINT, signal_handler); //TODO if these are in separate objects, maybe we
+                                    // have the directory list as a class data member
+                                    // such that both classes can handle the signal
+
+    // ---- BEGIN DirectoryMonitorCreator
+
+    // Try to initialize fanotify
+    // Set fanotify to give notifications on both accesses & attempted accesses    
+    unsigned int monitoring_flags = FAN_CLASS_CONTENT;
+    // Set event file to read-only and allow large files
+    unsigned int event_flags = O_RDONLY;// | O_LARGEFILE;
+    fanotify_fd = fanotify_init(monitoring_flags, event_flags);
+    if (fanotify_fd == -1)
+    {
+        cerr << "diraudit: cannot initialize fanotify file descriptor, errno:" << errno << endl;
+        exit(errno);
+    }
 
     // Open the csv file containing the list of directories
     
@@ -122,106 +136,62 @@ int main(int argc, char * argv[])
         exit(3);
     }
 
+    // TODO FAN_MARK_ONLYDIR 
+    // We want to add the marked directories as recursively monitored mounts
+    unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_MOUNT;
+    // TODO if (recursive_flag == true)
+    // mark_flags |= FAN_MARK_MOUNT;
+    // We want to monitor pretty much everything
+    uint64_t event_types_mask = FAN_ACCESS | FAN_MODIFY |
+                                FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
+                                FAN_OPEN | // TODO FAN_Q_OVERFLOW |
+                                //FAN_OPEN_PERM | FAN_ACCESS_PERM |
+                                FAN_ONDIR | FAN_EVENT_ON_CHILD;
+    
     // Add all of the directory names from the file into a vector
     vector<string> directory_names;
     string directory_name;
     while(dir_list_file >> directory_name)
     {
         cerr << "main(...): directory_name == " << directory_name << endl;
-        directory_names.push_back(directory_name);
-    }
-
-    
-    if(mkdir("/tmp/dirmon", 777) == -1)// TODO set permissions correctly
-    {
-        // We only care about the error if it's not a
-        // preexisting directory error 
-        if (errno != EEXIST)
-        {
-            cerr << "diraudit: cannot mkdir /tmp/dirmon, errno:" << errno << endl;
-            exit(errno);  
-        }
-    }
-    // fanotify requires that recursively monitored directories be mount points
-    // Map of mount directory names to real directory names
-    for (int i = 0; i < directory_names.size(); i++)
-    {
-        // TODO Map mount_directories to full paths
-        string mount_directory = "/tmp/dirmon";
-        size_t last_slash = directory_names[i].find_last_of("/");
-        mount_directory += directory_names[i].substr(last_slash);
-        if (mkdir(mount_directory.c_str(), 777) == -1) // TODO set permissions correctly        
-        {
-            // We only care about the error if it's not a
-            // preexisting directory error 
-            if (errno != EEXIST)
-            {
-                cerr << "diraudit: cannot mkdir /tmp/dirmon, errno:" << errno << endl;
-                exit(errno);  
-            }
-        }
-        cout << "main(...): Mounting directory '" 
-             << directory_names[i] << "' as '"
-             << mount_directory << "'" << endl; 
-        // TODO fix ext4
-        if (mount(directory_names[i].c_str(), mount_directory.c_str(), 
+        monitored_directories.insert(directory_name);
+        // Mount each of our directories
+        // NOTE: We need to mount the directory as itself because: 
+        // 1. fanotify requires that a directory be mounted to support the
+        //    FA_MARK_MOUNT recursive directory monitoring flag.
+        // 2. fanotify has a bug in Linux Kernel 3.17 onwards (see man) where 
+        //    it is only able to pick up notifications from mountpoints 
+        //    through the target mount point, and not the source. 
+        // TODO This has a vulnerability in that any process that is already
+        //      inside the directory before this mount occurs will not have
+        //      any of its accesses monitored.
+        if (mount(directory_name.c_str(), directory_name.c_str(), 
                   "", MS_BIND, "") == -1)
         {
-            cerr << "diraudit: cannot mount directory '" << directory_names[i]
+            cerr << "diraudit: cannot mount directory '" << directory_name
                  << "'for monitoring, errno:" << strerror(errno) << endl;
             exit(errno);
         }
-        cout << "main(...): Adding pair (" << mount_directory << "," << directory_names[i] << ") to map" << endl;
-        mount_map[mount_directory] = directory_names[i];
-    }
-
-    // Try to initialize inotify
-    // Set fanotify to give notifications on both accesses & attempted accesses    
-    unsigned int monitoring_flags = FAN_CLASS_CONTENT;
-    // Set event file to read-only and allow large files
-    unsigned int event_flags = O_RDONLY;// | O_LARGEFILE;
-    fanotify_fd = fanotify_init(monitoring_flags, event_flags);
-    if (fanotify_fd == -1)
-    {
-        cerr << "diraudit: cannot initialize fanotify file descriptor, errno:" << errno << endl;
-        exit(errno);
-    }
-    
-    // Mark each directory and save the mark descriptors    
-    map<string,int> mark_descriptors; // TODO Note: Wanted to use a map here to match file descriptors to filenames, but it would be tough due to the nature of fanotify_mark
-    int mark_descriptor;
-    // TODO FAN_MARK_ONLYDIR 
-    unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_MOUNT;
-    // TODO if (recursive_flag == true)
-    // mark_flags |= FAN_MARK_MOUNT;
-    uint64_t event_types_mask = FAN_ACCESS | FAN_MODIFY |
-                                FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
-                                FAN_OPEN | // TODO FAN_Q_OVERFLOW |
-                                //FAN_OPEN_PERM | FAN_ACCESS_PERM |
-                                FAN_ONDIR | FAN_EVENT_ON_CHILD;
-    for (auto pair = mount_map.begin(); pair != mount_map.end(); pair++)
-    //for (int i = 0; i < directory_names.size(); i++)
-    {
-        
-        // TODO A possible vulnerability is that the marks never get rebuilt,
-                // so we could be blind to newly created directories inside
-                // marked directories
-        // Mark the mounted directory (in /tmp/dirmon/) for viewing
+        cout << "main(...): Marking " << directory_name << endl;
+        // Mark the mounted directory for monitoring
         // (Pass in -1 for directory file descriptor because we expect
         // absolute pathnames)
-        //cout << "main(...): Marking " << directory_names[i] << endl;
-        cout << "main(...): Marking " << pair->first << endl;
         if (fanotify_mark(fanotify_fd, mark_flags,
                           event_types_mask,
                           -1,
                           //directory_names[i].c_str()) == -1)
-                          pair->first.c_str()) == -1)
+                          directory_name.c_str()) == -1)
         {
             cerr << "diraudit: cannot mark pathname '" 
                  //<< directory_names[i] << "'; (errno: "<<errno<<"); skipping directory..." << endl;
-                 << pair->first << "'; (errno: "<<errno<<"); skipping directory..." << endl;
+                 << directory_name << "'; (errno: "<<errno<<"); skipping directory..." << endl;
         }
     }
+
+    // ---- END DirectoryMonitorCreator
+
+
+    // ---- BEGIN DirectoryAuditor
 
     // Create or append to given output file
     audit_output_file = ofstream(audit_output_filename, 
