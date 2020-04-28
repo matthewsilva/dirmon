@@ -51,6 +51,13 @@ int fanotify_fd;
 ofstream audit_output_file;
 set<string> monitored_directories;
 
+// There should be a global collection of DirectoryMonitor objects
+// that the signal handler should iterate through and call clean up methods
+// on
+// NOTE: The signal handler does not need to give permissions to outstanding
+//       permission request events because closing the fanotify file descriptor
+//       does that automatically
+
 void signal_handler(int signal_number) {
     cout << "dirmon: Ending gracefully due to signal (" 
          << signal_number << ")" << endl;
@@ -100,7 +107,6 @@ int main(int argc, char * argv[])
                                     // such that both classes can handle the signal
 
     // ---- BEGIN DirectoryMonitorCreator
-
     // Try to initialize fanotify
     // Set fanotify to give notifications on both accesses & attempted accesses    
     unsigned int monitoring_flags = FAN_CLASS_CONTENT;
@@ -141,6 +147,10 @@ int main(int argc, char * argv[])
              << dir_list_filename << "': Unable to open file (bad permissions)" << endl;
         exit(3);
     }
+    // Create or append to given audit output file
+    audit_output_file = ofstream(audit_output_filename, 
+                               ofstream::out | ofstream::app);
+
 
     // TODO FAN_MARK_ONLYDIR 
     // We want to add the marked directories as recursively monitored mounts
@@ -151,9 +161,11 @@ int main(int argc, char * argv[])
     uint64_t event_types_mask = FAN_ACCESS | FAN_MODIFY |
                                 FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
                                 FAN_OPEN | // TODO FAN_Q_OVERFLOW |
-                                //FAN_OPEN_PERM | FAN_ACCESS_PERM |
+                                FAN_OPEN_PERM | FAN_ACCESS_PERM |
                                 FAN_ONDIR | FAN_EVENT_ON_CHILD;
     
+    
+
     // Add all of the directory names from the file into a vector
     vector<string> directory_names;
     string directory_name;
@@ -182,6 +194,12 @@ int main(int argc, char * argv[])
             exit(errno);
         }
         cout << "main(...): Marking " << directory_name << endl;
+    }
+
+    for (auto directory_name = monitored_directories.begin();
+         directory_name != monitored_directories.end();
+         directory_name++)
+    {
         // Mark the mounted directory for monitoring
         // (Pass in AT_FDCWD for directory file descriptor so that we can
         //  use relative pathnames if desired)
@@ -189,17 +207,13 @@ int main(int argc, char * argv[])
                           event_types_mask,
                           AT_FDCWD,
                           //directory_names[i].c_str()) == -1)
-                          directory_name.c_str()) == -1)
+                          directory_name->c_str()) == -1)
         {
             cerr << "diraudit: cannot mark pathname '" 
                  //<< directory_names[i] << "'; (errno: "<<errno<<"); skipping directory..." << endl;
-                 << directory_name << "'; (errno: "<<errno<<"); skipping directory..." << endl;
+                 << *directory_name << "'; (errno: "<<errno<<"); skipping directory..." << endl;
         }
     }
-
-    // Create or append to given output file
-    audit_output_file = ofstream(audit_output_filename, 
-                               ofstream::out | ofstream::app);
 
     // Specifically ignore events for the output file as to avoid
     // rapidly generating an infinite number of modify events if
@@ -251,7 +265,8 @@ int main(int argc, char * argv[])
             exit(errno);
         }
         
-        struct fanotify_event_metadata * event;
+        struct fanotify_event_metadata * event;       
+
         // Iterate over the variably-sized event metadata structs   
         for (event = events; 
              FAN_EVENT_OK(event,num_bytes_read); 
@@ -393,9 +408,6 @@ int main(int argc, char * argv[])
     // User
     // Process ID
     // Access Type
-            
-            
-           
         }
         
     }
