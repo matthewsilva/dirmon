@@ -196,7 +196,11 @@ int main(int argc, char * argv[])
                  << directory_name << "'; (errno: "<<errno<<"); skipping directory..." << endl;
         }
     }
-    
+
+    // Create or append to given output file
+    audit_output_file = ofstream(audit_output_filename, 
+                               ofstream::out | ofstream::app);
+
     // Specifically ignore events for the output file as to avoid
     // rapidly generating an infinite number of modify events if
     // the user wants to monitor the directory containing their 
@@ -217,10 +221,7 @@ int main(int argc, char * argv[])
 
     // ---- BEGIN DirectoryAuditor
 
-    // Create or append to given output file
-    audit_output_file = ofstream(audit_output_filename, 
-                               ofstream::out | ofstream::app);
-
+    
     time_t system_time;
     tm * UTC_time;
 
@@ -252,14 +253,10 @@ int main(int argc, char * argv[])
         
         struct fanotify_event_metadata * event;
         // Iterate over the variably-sized event metadata structs   
-        // TODO FAN_EVENT_NEXT(meta, len)     
-        for (char * event_ptr = reinterpret_cast<char*>(events); 
-             event_ptr - reinterpret_cast<char*>(events) < num_bytes_read; 
-             event_ptr += reinterpret_cast
-                    <struct fanotify_event_metadata*>(event_ptr)->event_len)
+        for (event = events; 
+             FAN_EVENT_OK(event,num_bytes_read); 
+             event = FAN_EVENT_NEXT(event,num_bytes_read))
         {
-            event = reinterpret_cast<struct fanotify_event_metadata*>(event_ptr);
-            
             // If we have the same PID as the editing process, it means
             // we should skip this event, and write nothing to the audit
             // file (if we write to the audit file, it will cause an infinite
