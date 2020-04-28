@@ -91,6 +91,8 @@ int main(int argc, char * argv[])
         exit(1);
     }    
 
+    cout << "diraudit: Beginning with PID: " << getpid() << endl;
+
     string dir_list_filename(argv[1]);
     string audit_output_filename(argv[2]);
 
@@ -138,7 +140,7 @@ int main(int argc, char * argv[])
 
     // TODO FAN_MARK_ONLYDIR 
     // We want to add the marked directories as recursively monitored mounts
-    unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_MOUNT;
+    unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_ONLYDIR | FAN_MARK_MOUNT;
     // TODO if (recursive_flag == true)
     // mark_flags |= FAN_MARK_MOUNT;
     // We want to monitor pretty much everything
@@ -154,7 +156,10 @@ int main(int argc, char * argv[])
     while(dir_list_file >> directory_name)
     {
         cerr << "main(...): directory_name == " << directory_name << endl;
+        // TODO maybe check to be sure that these are actually directories
+        //      before adding to the set?
         monitored_directories.insert(directory_name);
+
         // Mount each of our directories
         // NOTE: We need to mount the directory as itself because: 
         // 1. fanotify requires that a directory be mounted to support the
@@ -187,6 +192,22 @@ int main(int argc, char * argv[])
                  << directory_name << "'; (errno: "<<errno<<"); skipping directory..." << endl;
         }
     }
+    /*
+    // Specifically ignore events for the output file as to avoid
+    // rapidly generating an infinite number of modify events if
+    // the user wants to monitor the directory containing their 
+    // output file TODO maybe just drop events depending on their pid, as in,
+    // drop events with the same pid as this process
+    if (fanotify_mark(fanotify_fd, FAN_MARK_ADD | FAN_MARK_IGNORED_MASK,
+                      event_types_mask,
+                      -1,
+                      //directory_names[i].c_str()) == -1)
+                      audit_output_filename.c_str()) == -1)
+    {
+        cerr << "diraudit: cannot unmark audit output file '" 
+             //<< directory_names[i] << "'; (errno: "<<errno<<"); skipping directory..." << endl;
+             << audit_output_filename << "'; (errno: "<<errno<<")" << endl;
+    }*/
 
     // ---- END DirectoryMonitorCreator
 
@@ -215,6 +236,7 @@ int main(int argc, char * argv[])
     // Loop until program is terminated externally
     for (;;)
     {
+        cout << "main(...): Preparing to read fanotify fd" << endl;
         // TODO What is the behavior of read when the return is equal to the buffer size?    
         num_bytes_read = read(fanotify_fd, events, max_mem_bytes);
         cout << "main(...): num_bytes_read == " << num_bytes_read << endl;
@@ -234,6 +256,16 @@ int main(int argc, char * argv[])
                     <struct fanotify_event_metadata*>(event_ptr)->event_len)
         {
             event = reinterpret_cast<struct fanotify_event_metadata*>(event_ptr);
+            // TODO probably remove below for ignore-mask based method
+            // If we have the same PID as the editing process, it means
+            // we should skip this event, and write nothing to the audit
+            // file (if we write to the audit file, it will cause an infinite
+            // feedback loop of repeated file access and auditing)            
+            if (event->pid == getpid()) 
+            { 
+                close(event->fd);
+                continue; 
+            }            
             // Get the filename of the file descriptor accessed
             string fd_path = "/proc/self/fd/";
             fd_path += to_string(event->fd);
