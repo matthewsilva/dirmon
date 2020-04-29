@@ -47,45 +47,7 @@ using namespace std;
 
 const size_t max_mem_bytes = 4096;
 
-
-int fanotify_fd;
-ofstream audit_output_file;
-set<string> monitored_directories;
-
 bool signal_received = false;
-
-// There should be a global collection of DirectoryMonitor objects
-// that the signal handler should iterate through and call clean up methods
-// on
-// NOTE: The signal handler does not need to give permissions to outstanding
-//       permission request events because closing the fanotify file descriptor
-//       does that automatically
-
-void signal_handler(int signal_number) {
-    cout << "dirmon: Ending gracefully due to signal (" 
-         << signal_number << ")" << endl;
-    close(fanotify_fd);
-    audit_output_file.close();
-    for (auto monitored_directory = monitored_directories.begin();
-              monitored_directory != monitored_directories.end(); 
-              monitored_directory++)
-    //for (int i = 0; i < directory_names.size(); i++)
-    {
-        
-        cout << "signal_handler(...): Unmounting directory '" 
-             << *monitored_directory << "'" << endl;
-        // Use the MNT_DETACH flag because the monitored directories
-        // are likely in usage frequently, and we should wait until
-        // they are not in use to unmount them 
-        if (umount2(monitored_directory->c_str(), MNT_DETACH) == -1)
-        {
-            cerr << "diraudit: cannot unmount directory '" << *monitored_directory
-                 << "', errno:" << strerror(errno) << endl;
-        }
-    }
-    cout << "dirmon: Done with post-signal cleanup, exiting..." << endl;
-    exit(signal_number);
-}
 
 // Build the bitmask for the event types the user would like to audit
 uint64_t build_mask_from_args(int argc, char * argv[])
@@ -398,7 +360,119 @@ fstream open_fstream_safely(string dir_list_filename)
     return dir_list_file;
 }
 
-void audit_activity(int fanotify_fd, ofstream& audit_output_file)
+class DirectoryListAuditor
+{
+    private:
+        int fanotify_fd;
+        ofstream audit_output_file;
+        set<string> monitored_directories;
+        
+        // Single private instance of the class
+        static DirectoryListAuditor* instance;
+        /*
+        fstream open_fstream_safely(string dir_list_filename);
+        void write_event(struct fanotify_event_metadata * event,
+                  ofstream& audit_output_file);
+        string access_type_mask_to_string(unsigned long long mask);
+        void send_permission_response(int event_fd, int fanotify_fd);
+        bool requires_permission_response(unsigned long long mask);
+        string get_user_of_pid(pid_t pid);
+        string get_UTC_time_date();
+        string get_filepath_from_fd(int fd);
+        void mark_directories(int fanotify_fd, unsigned int mark_flags,
+                      uint64_t event_types_mask,
+                      set<string> monitored_directories, 
+                      set<string> excluded_directories);
+        void mount_directories(set<string> directories);
+        */
+        // Private constructors and assignment op to prevent user from
+        // creating new instances
+        DirectoryListAuditor();        
+        DirectoryListAuditor(const DirectoryListAuditor&);
+        DirectoryListAuditor& operator=(const DirectoryListAuditor&);
+        
+    public:
+        static DirectoryListAuditor* get_instance();
+        void initialize(uint64_t event_types_mask, 
+                                         string dir_list_filename,
+                                         string audit_output_filename);
+        void audit_activity();
+        static void signal_handler(int signal_number);
+};
+
+DirectoryListAuditor * DirectoryListAuditor::instance = NULL;
+
+DirectoryListAuditor::DirectoryListAuditor()
+{
+    
+}
+
+DirectoryListAuditor* DirectoryListAuditor::get_instance()
+{
+    if (instance == NULL)
+    {
+        instance = new DirectoryListAuditor();
+    }
+    return instance;
+}
+
+void DirectoryListAuditor::initialize(uint64_t event_types_mask, 
+                                      string dir_list_filename,
+                                      string audit_output_filename)
+{
+    // Create a signal handler to catch an interrupt signal     
+    signal(SIGINT, signal_handler); //TODO if these are in separate objects, maybe we
+                                    // have the directory list as a class data member
+                                    // such that both classes can handle the signal
+    
+
+    // Try to initialize fanotify
+    // Set fanotify to give notifications on both accesses & attempted accesses    
+    unsigned int monitoring_flags = FAN_CLASS_CONTENT;
+    // Set event file to read-only and allow large files
+    unsigned int event_flags = O_RDONLY;// | O_LARGEFILE;
+    fanotify_fd = fanotify_init(monitoring_flags, event_flags);
+    if (fanotify_fd == -1)
+    {
+        cerr << "diraudit: cannot initialize fanotify file descriptor, errno:" << errno << endl;
+        exit(errno);
+    }
+
+    // Open the directory list file
+    fstream dir_list_file = open_fstream_safely(dir_list_filename);
+    
+    // Create or append to given audit output file
+    audit_output_file = ofstream(audit_output_filename, 
+                               ofstream::out | ofstream::app);
+
+
+    // TODO FAN_MARK_ONLYDIR 
+    // We want to add the marked directories as recursively monitored mounts
+    unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_ONLYDIR | FAN_MARK_MOUNT;
+    // TODO if (recursive_flag == true)
+    // mark_flags |= FAN_MARK_MOUNT;
+
+    // Retrieve all of the directories to monitor and store them in a set
+    string directory_name;
+    while(dir_list_file >> directory_name)
+    {
+        monitored_directories.insert(directory_name);
+    }
+
+    // Mount all of the directories that will be monitored (required
+    // for recursive monitoring of directories and all subdirectories)
+    mount_directories(monitored_directories);
+
+    // Mark all of the directories for monitoring, and exclude the
+    // audit output file (prevents infinite feedback loop of file
+    // modifications)
+    set<string> excluded_directories;
+    excluded_directories.insert(audit_output_filename);
+    mark_directories(fanotify_fd, mark_flags, event_types_mask,
+                     monitored_directories, excluded_directories);
+}
+
+void DirectoryListAuditor::audit_activity()
 {
     // Create buffer for reading events
     struct fanotify_event_metadata * events =
@@ -447,6 +521,40 @@ void audit_activity(int fanotify_fd, ofstream& audit_output_file)
     }
 }
 
+// TODO There should be a global collection of DirectoryMonitor objects
+// that the signal handler should iterate through and call clean up methods
+// on
+// NOTE: The signal handler does not need to give permissions to outstanding
+//       permission request events because closing the fanotify file descriptor
+//       does that automatically
+void DirectoryListAuditor::signal_handler(int signal_number) {
+
+    cout << "dirmon: Ending gracefully due to signal (" 
+         << signal_number << ")" << endl;
+    close(instance->fanotify_fd);
+    instance->audit_output_file.close();
+    for (auto monitored_directory = instance->monitored_directories.begin();
+              monitored_directory != instance->monitored_directories.end(); 
+              monitored_directory++)
+    //for (int i = 0; i < directory_names.size(); i++)
+    {
+        
+        cout << "signal_handler(...): Unmounting directory '" 
+             << *monitored_directory << "'" << endl;
+        // Use the MNT_DETACH flag because the monitored directories
+        // are likely in usage frequently, and we should wait until
+        // they are not in use to unmount them 
+        if (umount2(monitored_directory->c_str(), MNT_DETACH) == -1)
+        {
+            cerr << "diraudit: cannot unmount directory '" << *monitored_directory
+                 << "', errno:" << strerror(errno) << endl;
+        }
+    }
+    cout << "dirmon: Done with post-signal cleanup, exiting..." << endl;
+    exit(signal_number);
+
+}
+
 int main(int argc, char * argv[])
 {
     // TODO add options to set which things get recorded
@@ -484,67 +592,18 @@ int main(int argc, char * argv[])
     // Get the directory list and output filenames from the last two arguments
     string dir_list_filename(argv[argc-2]);
     string audit_output_filename(argv[argc-1]);
-
-    // Create a signal handler to catch an interrupt signal     
-    signal(SIGINT, signal_handler); //TODO if these are in separate objects, maybe we
-                                    // have the directory list as a class data member
-                                    // such that both classes can handle the signal
     
-    // ---- BEGIN DirectoryMonitorCreator
-    // Try to initialize fanotify
-    // Set fanotify to give notifications on both accesses & attempted accesses    
-    unsigned int monitoring_flags = FAN_CLASS_CONTENT;
-    // Set event file to read-only and allow large files
-    unsigned int event_flags = O_RDONLY;// | O_LARGEFILE;
-    fanotify_fd = fanotify_init(monitoring_flags, event_flags);
-    if (fanotify_fd == -1)
-    {
-        cerr << "diraudit: cannot initialize fanotify file descriptor, errno:" << errno << endl;
-        exit(errno);
-    }
-
-    // Open the directory list file
-    fstream dir_list_file = open_fstream_safely(dir_list_filename);
     
-    // Create or append to given audit output file
-    audit_output_file = ofstream(audit_output_filename, 
-                               ofstream::out | ofstream::app);
-
-
-    // TODO FAN_MARK_ONLYDIR 
-    // We want to add the marked directories as recursively monitored mounts
-    unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_ONLYDIR | FAN_MARK_MOUNT;
-    // TODO if (recursive_flag == true)
-    // mark_flags |= FAN_MARK_MOUNT;
-
-    // Retrieve all of the directories to monitor and store them in a set
-    string directory_name;
-    while(dir_list_file >> directory_name)
-    {
-        monitored_directories.insert(directory_name);
-    }
-        
-    // Mount all of the directories that will be monitored (required
-    // for recursive monitoring of directories and all subdirectories)
-    mount_directories(monitored_directories);
-
-    // Mark all of the directories for monitoring, and exclude the
-    // audit output file (prevents infinite feedback loop of file
-    // modifications)
-    set<string> excluded_directories;
-    excluded_directories.insert(audit_output_filename);
-    mark_directories(fanotify_fd, mark_flags, event_types_mask,
-                     monitored_directories, excluded_directories);
-    
-    // ---- END DirectoryMonitorCreator
-
-
-    // ---- BEGIN DirectoryAuditor
-
-    // Continuously audit for configured activities within the configured
-    // directories (the program will never return from this call)
-    audit_activity(fanotify_fd, audit_output_file);
-
+    // TODO Directory auditor should actually take dirs.txt because it needs to
+    // mark dirs.txt and update other marks anytime that dirs.txt changes
+    DirectoryListAuditor * auditor = DirectoryListAuditor::get_instance();
+    auditor->initialize(event_types_mask, dir_list_filename,
+                        audit_output_filename);
+    // Continuously audit to the configured audit output file 
+    // for configured activities within the configured
+    // directories (the program will never return from this call, and
+    // depends on a signal handler to terminate and clean up everything)
+    auditor->audit_activity();
     
 }
 /*
