@@ -1,7 +1,4 @@
-
-
 /* 
-
 File Audit System
 
 Description
@@ -23,7 +20,6 @@ Pick an object-oriented language
 Upload your source to a public source repository or provide the 
     full source by a different means
 Include any notes or thoughts on the project
-
 */
 
 // TODO cron ?
@@ -59,6 +55,8 @@ int main(int argc, char * argv[])
     if (argc == 2 && (string(argv[1]) == "--help" || string(argv[1]) == "-h"))
     {
         cout << "Usage: diraudit [OPTION]... DIRECTORY_LIST_FILE AUDIT_OUTPUT_FILENAME" << endl;
+        cout << "   If [OPTION] is omitted, all types of access " << endl;
+        cout << "   are audited" << endl;        
         cout << "   [OPTION]... is composed of one or more of " << endl;
         cout << "   the following options (see man fanotify_mark" << endl;
         cout << "   for explanations of each option)" << endl;
