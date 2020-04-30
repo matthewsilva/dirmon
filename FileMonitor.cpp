@@ -130,15 +130,3 @@ uint64_t build_mask_from_args(int argc, char * argv[])
     }
     return event_types_mask;
 }
-
-/*
-struct fanotify_event_metadata {
-                   __u32 event_len;
-                   __u8 vers; // TODO check vers?
-                   __u8 reserved;
-                   __u16 metadata_len;
-                   __aligned_u64 mask;
-                   __s32 fd;
-                   __s32 pid;
-               };
-*/
