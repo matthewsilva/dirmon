@@ -6,6 +6,10 @@ using namespace std;
 // Singleton instance
 DirectoryListAuditor * DirectoryListAuditor::instance = NULL;
 
+// Input:   List of directories to mount as themselves
+// Output:  None
+// Return:  None, but exits with errno set according to failed mount
+//              call if mount fails
 void DirectoryListAuditor::mount_directories(set<string> directories)
 {
     for (auto directory_name = directories.begin();
@@ -19,7 +23,8 @@ void DirectoryListAuditor::mount_directories(set<string> directories)
         // 2. fanotify has a bug in Linux Kernel 3.17 onwards (see man) where 
         //    it is only able to pick up notifications from mountpoints 
         //    through the target mount point, and not the source. 
-        // TODO This has a vulnerability in that any process that is already
+        //        
+        // NOTE:This has a vulnerability in that any process that is already
         //      inside the directory before this mount occurs will not have
         //      any of its accesses monitored.
         if (mount(directory_name->c_str(), directory_name->c_str(), 
@@ -58,10 +63,6 @@ void DirectoryListAuditor::mark_directories(int fanotify_fd,
         }
     }
 
-    // Specifically ignore events for the output file as to avoid
-    // rapidly generating an infinite number of modify events if
-    // the user wants to monitor the directory containing their 
-    // output file 
     for (auto directory_name = excluded_directories.begin();
          directory_name != excluded_directories.end();
          directory_name++)
@@ -236,8 +237,6 @@ fstream DirectoryListAuditor::open_fstream_safely(string dir_list_filename)
     int dir_list_fd = open(dir_list_filename.c_str(), O_PATH);
     if(dir_list_fd == -1)
     {
-        // TODO Could check for errno either EACCESS or ENOENT to differentiate
-        //      between bad permissions and nonexistent file
         cerr << "diraudit: cannot open directory list file '" 
              << dir_list_filename << "'; errno: '" << errno 
              << "'; No such file" << endl;        
@@ -264,10 +263,11 @@ fstream DirectoryListAuditor::open_fstream_safely(string dir_list_filename)
 }
 
 DirectoryListAuditor::DirectoryListAuditor()
-{
-    
+{    
 }
 
+// Create static singleton instance if it doesn't exist,
+// otherwise return the existing static instance
 DirectoryListAuditor* DirectoryListAuditor::get_instance()
 {
     if (instance == NULL)
@@ -281,16 +281,14 @@ void DirectoryListAuditor::initialize(uint64_t event_types_mask,
                                       string dir_list_filename,
                                       string audit_output_filename)
 {
-    // Create a signal handler to catch the SIGTERM shutdown signal signal     
-    signal(SIGINT, signal_handler); //TODO if these are in separate objects, maybe we
-                                    // have the directory list as a class data member
-                                    // such that both classes can handle the signal
+    // Create a signal handler to catch the SIGTERM shutdown signal     
+    signal(SIGTERM, signal_handler); 
 
     // Try to initialize fanotify
     // Set fanotify to give notifications on both accesses & attempted accesses    
     unsigned int monitoring_flags = FAN_CLASS_CONTENT;
     // Set event file to read-only and allow large files
-    unsigned int event_flags = O_RDONLY;// | O_LARGEFILE;
+    unsigned int event_flags = O_RDONLY | O_LARGEFILE;
     fanotify_fd = fanotify_init(monitoring_flags, event_flags);
     if (fanotify_fd == -1)
     {
@@ -305,13 +303,9 @@ void DirectoryListAuditor::initialize(uint64_t event_types_mask,
     audit_output_file = ofstream(audit_output_filename, 
                                ofstream::out | ofstream::app);
 
-
-    // TODO FAN_MARK_ONLYDIR 
     // We want to add the marked directories as recursively monitored mounts
     unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_ONLYDIR | FAN_MARK_MOUNT;
-    // TODO if (recursive_flag == true)
-    // mark_flags |= FAN_MARK_MOUNT;
-
+    
     // Retrieve all of the directories to monitor and store them in a set
     string directory_name;
     while(dir_list_file >> directory_name)
@@ -323,11 +317,15 @@ void DirectoryListAuditor::initialize(uint64_t event_types_mask,
     // for recursive monitoring of directories and all subdirectories)
     mount_directories(monitored_directories);
 
-    // Mark all of the directories for monitoring, and exclude the
-    // audit output file (prevents infinite feedback loop of file
-    // modifications)
+    // Specifically ignore events for the output file as to avoid
+    // rapidly generating an infinite feedback loop of modify events if
+    // the user wants to monitor the directory containing their 
+    // output file 
     set<string> excluded_directories;
     excluded_directories.insert(audit_output_filename);
+    
+    // Mark all of the directories for monitoring, and exclude the
+    // audit output file
     mark_directories(fanotify_fd, mark_flags, event_types_mask,
                      monitored_directories, excluded_directories);
 }
