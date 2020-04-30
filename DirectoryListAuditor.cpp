@@ -111,6 +111,15 @@ void DirectoryListAuditor::audit_activity(const size_t event_buf_size)
              FAN_EVENT_OK(event,num_bytes_read); 
              event = FAN_EVENT_NEXT(event,num_bytes_read))
         {
+            // TODO maybe move this into separate for loop above to prevent
+            // deadlock in case the user wants to monitory a file tree
+            // containing the monitoring software, but also, we 
+            // should consider that we should never mark the 
+            // output file...
+            if(requires_permission_response(event->mask))
+            {
+                send_permission_response(event->fd, fanotify_fd);
+            }
             // If we have the same PID as the editing process, it means
             // we should skip this event, and write nothing to the audit
             // file (if we write to the audit file, it will cause an infinite
@@ -122,15 +131,6 @@ void DirectoryListAuditor::audit_activity(const size_t event_buf_size)
             { 
                 close(event->fd);
                 continue;
-            }
-            // TODO maybe move this into separate for loop above to prevent
-            // deadlock in case the user wants to monitory a file tree
-            // containing the monitoring software, but also, we 
-            // should consider that we should never mark the 
-            // output file...
-            if(requires_permission_response(event->mask))
-            {
-                send_permission_response(event->fd, fanotify_fd);
             }
             write_event(event, audit_output_file);
         }
@@ -246,7 +246,6 @@ string DirectoryListAuditor::get_filepath_from_fd(int fd)
     if (num_chars_retrieved != -1)
     {
         filepath[num_chars_retrieved] = '\0';
-        close(fd);
         return filepath;
     }
     // Otherwise, we couldn't find it
