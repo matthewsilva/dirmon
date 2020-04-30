@@ -6,10 +6,155 @@ using namespace std;
 // Singleton instance
 DirectoryListAuditor * DirectoryListAuditor::instance = NULL;
 
-// Input:   List of directories to mount as themselves
-// Output:  None
-// Return:  None, but exits with errno set according to failed mount
-//              call if mount fails
+// -- PUBLIC -------------------------------------------------------------------
+
+// Create static singleton instance if it doesn't exist,
+// otherwise return the existing static instance
+DirectoryListAuditor* DirectoryListAuditor::get_instance()
+{
+    if (instance == NULL)
+    {
+        instance = new DirectoryListAuditor();
+    }
+    return instance;
+}
+
+// TODO Pass in an error_stream that would allow us to write to cerr or
+//      a file depending on whether we are using a terminal or the service
+//  Initialize the singleton instance to be ready to start auditing the given
+//  event types for the given directories to the given output file.
+//  DirectoryListAuditor is ready to call DirectoryListAuditor::audit_activity() 
+//  after this. 
+void DirectoryListAuditor::initialize(uint64_t event_types_mask, 
+                                      string dir_list_filename,
+                                      string audit_output_filename)
+{
+    // Create a signal handler to catch the SIGTERM shutdown signal to clean
+    // things up when the program ends     
+    signal(SIGTERM, signal_handler); 
+    // Create a signal handler to catch the SIGINT CTRL-C signal to clean
+    // things up if a user is running dirmon from the command line     
+    signal(SIGINT, signal_handler); 
+
+    // Try to initialize fanotify
+    // Set fanotify to give notifications on both accesses & attempted accesses    
+    unsigned int monitoring_flags = FAN_CLASS_CONTENT;
+    // Set event file to read-only and allow large files
+    unsigned int event_flags = O_RDONLY | O_LARGEFILE;
+    fanotify_fd = fanotify_init(monitoring_flags, event_flags);
+    if (fanotify_fd == -1)
+    {
+        cerr << "diraudit: cannot initialize fanotify file descriptor, errno:" 
+             << strerror(errno) << endl;
+        exit(errno);
+    }
+
+    // Open the directory list file
+    fstream dir_list_file = open_fstream_safely(dir_list_filename);
+    
+    // Create or append to given audit output file
+    audit_output_file = ofstream(audit_output_filename, 
+                               ofstream::out | ofstream::app);
+    // TODO
+    output_filename = audit_output_filename;
+
+    // We want to add the marked directories as recursively monitored mounts
+    unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_ONLYDIR | FAN_MARK_MOUNT;
+    
+    // Retrieve all of the directories to monitor and store them in a set
+    string directory_name;
+    while(dir_list_file >> directory_name)
+    {
+        monitored_directories.insert(directory_name);
+    }
+
+    // Mount all of the directories that will be monitored (required
+    // for recursive monitoring of directories and all subdirectories)
+    mount_directories(monitored_directories);
+
+    // Specifically ignore events for the output file as to avoid
+    // rapidly generating an infinite feedback loop of modify events if
+    // the user wants to monitor the directory containing their 
+    // output file 
+    set<string> excluded_directories;
+    excluded_directories.insert(audit_output_filename);
+    
+    // Mark all of the directories for monitoring, and exclude the
+    // audit output file
+    mark_directories(fanotify_fd, mark_flags, event_types_mask,
+                     monitored_directories, excluded_directories);
+}
+
+//  Begin to audit according to the guidelines configured in 
+//  DirectoryListAuditor::initialize(...)
+void DirectoryListAuditor::audit_activity(const size_t event_buf_size)
+{
+    // Create buffer for reading events
+    events = (struct fanotify_event_metadata *) malloc(event_buf_size);
+    
+    ssize_t num_bytes_read;
+    
+    // Loop until program is terminated externally
+    for (;;)
+    {
+        // TODO What is the behavior of read when the return is equal to the buffer size?    
+        num_bytes_read = read(fanotify_fd, events, event_buf_size);
+        cout << "audit_activity(...): num_bytes_read == " << num_bytes_read << endl;
+        if (num_bytes_read == -1)
+        {
+            cerr << "dirmon: error reading from fanotify file descriptor" << endl;
+            clean_up();            
+            exit(errno);
+        }
+        // Iterate over the variably-sized event metadata structs   
+        for (struct fanotify_event_metadata * event = events; 
+             FAN_EVENT_OK(event,num_bytes_read); 
+             event = FAN_EVENT_NEXT(event,num_bytes_read))
+        {
+            // If we have the same PID as the editing process, it means
+            // we should skip this event, and write nothing to the audit
+            // file (if we write to the audit file, it will cause an infinite
+            // feedback loop of repeated file access and auditing). We should
+            // also skip this event if it is generated for the audit output
+            // file TODO            
+            if (event->pid == getpid() || 
+                get_filepath_from_fd(event->fd) == output_filename) 
+            { 
+                close(event->fd);
+                continue;
+            }
+            // TODO maybe move this into separate for loop above to prevent
+            // deadlock in case the user wants to monitory a file tree
+            // containing the monitoring software, but also, we 
+            // should consider that we should never mark the 
+            // output file...
+            if(requires_permission_response(event->mask))
+            {
+                send_permission_response(event->fd, fanotify_fd);
+            }
+            write_event(event, audit_output_file);
+        }
+    }
+}
+
+// Handle a signal by cleaning up the class and then exiting
+void DirectoryListAuditor::signal_handler(int signal_number)
+{
+    cout << "dirmon: Ending gracefully due to signal (" 
+         << signal_number << ")" << endl;
+    instance->clean_up();
+    cout << "dirmon: Done with post-signal cleanup, exiting..." << endl;
+    exit(signal_number);
+}
+
+// -----------------------------------------------------------------------------
+
+
+
+// -- PRIVATE ------------------------------------------------------------------
+
+// Mount the given set of directories, exiting with errno set if mount fails
+// on any of them
 void DirectoryListAuditor::mount_directories(set<string> directories)
 {
     for (auto directory_name = directories.begin();
@@ -30,14 +175,17 @@ void DirectoryListAuditor::mount_directories(set<string> directories)
         if (mount(directory_name->c_str(), directory_name->c_str(), 
                   "", MS_BIND, "") == -1)
         {
-            cerr << "diraudit: cannot mount directory '" << *directory_name
+            cerr << "dirmon: cannot mount directory '" << *directory_name
                  << "'for monitoring, errno:" << strerror(errno) << endl;
+            clean_up();            
             exit(errno);
         }
     }
 }
 
-
+//  Mark the given directories for monitoring for the specified types of
+//  access events using the open fanotify file descriptor. Exlcude the
+//  other set of directories for the same types of access events.
 void DirectoryListAuditor::mark_directories(int fanotify_fd, 
                                             unsigned int mark_flags,
                                             uint64_t event_types_mask,
@@ -48,7 +196,6 @@ void DirectoryListAuditor::mark_directories(int fanotify_fd,
          directory_name != monitored_directories.end();
          directory_name++)
     {
-        cout << "main(...): Marking " << *directory_name << endl;
         // Mark the mounted directory for monitoring
         // (Pass in AT_FDCWD for directory file descriptor so that we can
         //  use relative pathnames if desired)
@@ -58,8 +205,9 @@ void DirectoryListAuditor::mark_directories(int fanotify_fd,
                           //directory_names[i].c_str()) == -1)
                           directory_name->c_str()) == -1)
         {
-            cerr << "diraudit: cannot mark pathname '" 
-                 << *directory_name << "'; (errno: "<<errno<<"); skipping directory..." << endl;
+            cerr << "dirmon: cannot mark pathname '" 
+                 << *directory_name << "'; (errno: " << strerror(errno)
+                 << "); skipping directory..." << endl;
         }
     }
 
@@ -76,31 +224,39 @@ void DirectoryListAuditor::mark_directories(int fanotify_fd,
         {
             cerr << "diraudit: cannot unmark audit output file '" 
                  //<< directory_names[i] << "'; (errno: "<<errno<<"); skipping directory..." << endl;
-                 << *directory_name << "'; (errno: "<<errno<<")" << endl;
+                 << *directory_name << "'; (errno: " 
+                 << strerror(errno) << ")" << endl;
         }
     }
 }
 
+// Return the filepath that the given open file descriptor corresponds to
 string DirectoryListAuditor::get_filepath_from_fd(int fd)
 {
     // Buffer for retrieving the filepaths of accessed files later
     char filepath[1024];
+
+    // Read the filepath from the /proc/self/fd subsystem 
+    // for this file descriptor 
     string fd_path = "/proc/self/fd/";
     fd_path += to_string(fd);
-    cout << "main(...): event->fd == " << fd << endl;
     size_t num_chars_retrieved = readlink(fd_path.c_str(), filepath, sizeof(filepath)-1);            
+    
+    // If we retrieved a filepath, return it
     if (num_chars_retrieved != -1)
     {
         filepath[num_chars_retrieved] = '\0';
         close(fd);
         return filepath;
     }
+    // Otherwise, we couldn't find it
     else
     {
         return "FILE_NOT_FOUND";
     }
 }
 
+// Get the current time and date in UTC and return it as a string
 string DirectoryListAuditor::get_UTC_time_date()
 {
     time_t system_time = time(0);
@@ -108,9 +264,12 @@ string DirectoryListAuditor::get_UTC_time_date()
     string UTC_time_str(asctime(UTC_time));
     // Remove trailing newline
     UTC_time_str.erase(UTC_time_str.end()-1);
+    // Add (UTC) identifier
+    UTC_time_str += "(UTC)"; 
     return UTC_time_str;
 }
 
+// Return the username of the user who owns the given pid
 string DirectoryListAuditor::get_user_of_pid(pid_t pid)
 {
     // We want to get the info from /proc/#pid/status and resolve
@@ -122,13 +281,12 @@ string DirectoryListAuditor::get_user_of_pid(pid_t pid)
     pid_list[1] = 0;
     PROCTAB * proc_tab = openproc(proc_flags, pid_list);
     
-    // TODO see man readproc, don't want to alloc/free all the time
-    //proc_t * found = (proc_t*) malloc(1024*sizeof(proc_t));
     proc_t * found = readproc(proc_tab, NULL);
     if (found)
     {
+        // Extract the username, free the proc structure, and return
         string username(found->ruser);        
-        freeproc(found);   // TODO see man readproc, don't want to alloc/free all the time 
+        freeproc(found);   
         return username;
     }
     else
@@ -136,7 +294,9 @@ string DirectoryListAuditor::get_user_of_pid(pid_t pid)
         return "CANNOT_FIND_USER_DEAD_PROCESS";
     }
 }
-// Argument is an unsigned long long because __aligned is not allowed
+
+// Determine whether the fanotify_mark bitmask requires a permission response
+// NOTE: Argument is an unsigned long long because __aligned is not allowed
 bool DirectoryListAuditor::requires_permission_response(unsigned long long mask)
 {
     if ((mask & FAN_ACCESS_PERM) || (mask & FAN_OPEN_PERM))
@@ -146,18 +306,25 @@ bool DirectoryListAuditor::requires_permission_response(unsigned long long mask)
     return false;
 }
 
+// Send an fantofiy_response for the given event to the given fanotify
+// file descriptor (so that it can access the file it wants to access 
 void DirectoryListAuditor::send_permission_response(int event_fd, 
                                                     int fanotify_fd)
 {
     struct fanotify_response permission_event_response;
     permission_event_response.fd = event_fd;
     // TODO create option to map directories to yes/no access
-    //if (
+    // Best approach would probably be to start with the full path of the file
+    // and cut down the path one directory at a time until we reach the
+    // directory from the directory list, and then checking the mapping on that
+    // for yes/no access
     permission_event_response.response = FAN_ALLOW;
     write (fanotify_fd, &permission_event_response, 
            sizeof(struct fanotify_response));
 }
 
+// Given an fanotify_mark access type mask, generate a string representing
+// the different access types found
 // Argument is an unsigned long long because __aligned is not allowed
 string DirectoryListAuditor::access_type_mask_to_string(unsigned long long mask)
 {
@@ -206,6 +373,9 @@ string DirectoryListAuditor::access_type_mask_to_string(unsigned long long mask)
     return access_string;
 }
 
+// Process the given event into a line of information including filepath,
+// time of access, username of accessing process, pid of accessing process,
+// and type of access. Write this line of info to the given audit output file 
 void DirectoryListAuditor::write_event(struct fanotify_event_metadata * event,
                                        ofstream& audit_output_file)
 {
@@ -213,24 +383,28 @@ void DirectoryListAuditor::write_event(struct fanotify_event_metadata * event,
     // Get the filename of the file descriptor accessed
     event_str += get_filepath_from_fd(event->fd) + ",";
 
-    // Get the time and date in UTC and add it to the audit file
+    // Get the time and date in UTC and add it to the string
     event_str += get_UTC_time_date() + ",";
     
-    // Get the username of the process and add it to the audit file
+    // Get the username of the process and add it to the string
     event_str += get_user_of_pid(event->pid) + ",";
     
-    // Put the pid of the accessing process into the audit file
+    // Put the pid of the accessing process into the string
     event_str += to_string(event->pid) + ",";
     
     // Create string of access types to file
-    // TODO break out into a function that takes a mask & rets a string
     event_str += access_type_mask_to_string(event->mask) + ",";
     
+    // Write the string of info to the output file
     audit_output_file << event_str << endl;
     
+    // Flush output to the output file to be sure that the info is actually
+    // written
     audit_output_file.flush();
 }
 
+// Open an fstream safely, exiting with an appropriate error message
+// if the file doesn't exist or if it has bad permissions
 fstream DirectoryListAuditor::open_fstream_safely(string dir_list_filename)
 {
     // Open the directory list file strictly to see if it exists
@@ -239,7 +413,8 @@ fstream DirectoryListAuditor::open_fstream_safely(string dir_list_filename)
     {
         cerr << "diraudit: cannot open directory list file '" 
              << dir_list_filename << "'; errno: '" << errno 
-             << "'; No such file" << endl;        
+             << "'; No such file" << endl;
+        clean_up();
         exit(errno);
     }
     else
@@ -257,140 +432,23 @@ fstream DirectoryListAuditor::open_fstream_safely(string dir_list_filename)
     {
         cerr << "diraudit: cannot open directory list file '" 
              << dir_list_filename << "': Unable to open file (bad permissions)" << endl;
+        clean_up();        
         exit(3);
     }
     return dir_list_file;
 }
 
-DirectoryListAuditor::DirectoryListAuditor()
-{    
-}
-
-// Create static singleton instance if it doesn't exist,
-// otherwise return the existing static instance
-DirectoryListAuditor* DirectoryListAuditor::get_instance()
-{
-    if (instance == NULL)
-    {
-        instance = new DirectoryListAuditor();
-    }
-    return instance;
-}
-
-void DirectoryListAuditor::initialize(uint64_t event_types_mask, 
-                                      string dir_list_filename,
-                                      string audit_output_filename)
-{
-    // Create a signal handler to catch the SIGTERM shutdown signal     
-    signal(SIGTERM, signal_handler); 
-
-    // Try to initialize fanotify
-    // Set fanotify to give notifications on both accesses & attempted accesses    
-    unsigned int monitoring_flags = FAN_CLASS_CONTENT;
-    // Set event file to read-only and allow large files
-    unsigned int event_flags = O_RDONLY | O_LARGEFILE;
-    fanotify_fd = fanotify_init(monitoring_flags, event_flags);
-    if (fanotify_fd == -1)
-    {
-        cerr << "diraudit: cannot initialize fanotify file descriptor, errno:" << errno << endl;
-        exit(errno);
-    }
-
-    // Open the directory list file
-    fstream dir_list_file = open_fstream_safely(dir_list_filename);
-    
-    // Create or append to given audit output file
-    audit_output_file = ofstream(audit_output_filename, 
-                               ofstream::out | ofstream::app);
-
-    // We want to add the marked directories as recursively monitored mounts
-    unsigned int mark_flags = FAN_MARK_ADD | FAN_MARK_ONLYDIR | FAN_MARK_MOUNT;
-    
-    // Retrieve all of the directories to monitor and store them in a set
-    string directory_name;
-    while(dir_list_file >> directory_name)
-    {
-        monitored_directories.insert(directory_name);
-    }
-
-    // Mount all of the directories that will be monitored (required
-    // for recursive monitoring of directories and all subdirectories)
-    mount_directories(monitored_directories);
-
-    // Specifically ignore events for the output file as to avoid
-    // rapidly generating an infinite feedback loop of modify events if
-    // the user wants to monitor the directory containing their 
-    // output file 
-    set<string> excluded_directories;
-    excluded_directories.insert(audit_output_filename);
-    
-    // Mark all of the directories for monitoring, and exclude the
-    // audit output file
-    mark_directories(fanotify_fd, mark_flags, event_types_mask,
-                     monitored_directories, excluded_directories);
-}
-
-void DirectoryListAuditor::audit_activity(const size_t event_buf_size)
-{
-    // Create buffer for reading events
-    struct fanotify_event_metadata * events =
-        (struct fanotify_event_metadata *) malloc(event_buf_size);
-    
-    ssize_t num_bytes_read;
-    
-    // Loop until program is terminated externally
-    for (;;)
-    {
-        cout << "main(...): Preparing to read fanotify fd" << endl;
-        // TODO What is the behavior of read when the return is equal to the buffer size?    
-        num_bytes_read = read(fanotify_fd, events, event_buf_size);
-        cout << "main(...): num_bytes_read == " << num_bytes_read << endl;
-
-        if (num_bytes_read == -1)
-        {
-            cerr << "diraudit: error reading from fanotify file descriptor" << endl;
-            exit(errno);
-        }
-        // Iterate over the variably-sized event metadata structs   
-        for (struct fanotify_event_metadata * event = events; 
-             FAN_EVENT_OK(event,num_bytes_read); 
-             event = FAN_EVENT_NEXT(event,num_bytes_read))
-        {
-            // If we have the same PID as the editing process, it means
-            // we should skip this event, and write nothing to the audit
-            // file (if we write to the audit file, it will cause an infinite
-            // feedback loop of repeated file access and auditing)            
-            if (event->pid == getpid()) 
-            { 
-                close(event->fd);
-                continue;
-            }
-            // TODO maybe move this into separate for loop above to prevent
-            // deadlock in case the user wants to monitory a file tree
-            // containing the monitoring software, but also, we 
-            // should consider that we should never mark the 
-            // output file...
-            if(requires_permission_response(event->mask))
-            {
-                send_permission_response(event->fd, fanotify_fd);
-            }
-            write_event(event, audit_output_file);
-        }
-    }
-}
-
-// TODO There should be a global collection of DirectoryMonitor objects
-// that the signal handler should iterate through and call clean up methods
-// on
-// NOTE: The signal handler does not need to give permissions to outstanding
+//  Cleans up the system state created by fanotify 
+// NOTE: clean_up does not need to give permissions to outstanding
 //       permission request events because closing the fanotify file descriptor
 //       does that automatically
-void DirectoryListAuditor::signal_handler(int signal_number) {
+void DirectoryListAuditor::clean_up() {
 
-    cout << "dirmon: Ending gracefully due to signal (" 
-         << signal_number << ")" << endl;
     close(instance->fanotify_fd);
-    instance->audit_output_file.close();
+    if(instance->audit_output_file.is_open())
+    {
+        instance->audit_output_file.close();
+    }
     for (auto monitored_directory = instance->monitored_directories.begin();
               monitored_directory != instance->monitored_directories.end(); 
               monitored_directory++)
@@ -408,7 +466,20 @@ void DirectoryListAuditor::signal_handler(int signal_number) {
                  << "', errno:" << strerror(errno) << endl;
         }
     }
-    cout << "dirmon: Done with post-signal cleanup, exiting..." << endl;
-    exit(signal_number);
 
+    // Free memory of fanotify events buffer
+    if (events) 
+    {
+        free(events);
+    }
 }
+
+// Constructor
+DirectoryListAuditor::DirectoryListAuditor()
+{    
+    fanotify_fd = 0;
+    events = NULL;
+}
+
+
+

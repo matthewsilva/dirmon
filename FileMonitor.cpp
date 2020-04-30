@@ -50,11 +50,10 @@ uint64_t build_mask_from_args(int argc, char * argv[]);
 
 int main(int argc, char * argv[])
 {
-    // TODO add options to set which things get recorded
-
     if (argc == 2 && (string(argv[1]) == "--help" || string(argv[1]) == "-h"))
     {
-        cout << "Usage: diraudit [OPTION]... DIRECTORY_LIST_FILE AUDIT_OUTPUT_FILENAME" << endl;
+        cout << "Usage: dirmon [OPTION]... DIRECTORY_LIST_FILE AUDIT_OUTPUT_FILENAME" << endl;
+        cout << "NOTE: dirmon must be run as root (e.g. sudo)!" << endl;
         cout << "   If [OPTION] is omitted, all types of access " << endl;
         cout << "   are audited" << endl;        
         cout << "   [OPTION]... is composed of one or more of " << endl;
@@ -74,16 +73,14 @@ int main(int argc, char * argv[])
     // Ensure we have the required arguments
     else if (argc < 3)
     {
-        cerr << "diraudit: missing file operands" << endl;
-        cerr << "Usage: diraudit [OPTION]... DIRECTORY_LIST_FILE AUDIT_OUTPUT_FILENAME" << endl;
+        cerr << "dirmon: missing file operands" << endl;
+        cerr << "Usage: dirmon [OPTION]... DIRECTORY_LIST_FILE AUDIT_OUTPUT_FILENAME" << endl;
         exit(1);
     }
     
     // Build the bitmask for the event types the user would like to audit
     uint64_t event_types_mask = build_mask_from_args(argc,argv);
     
-    cout << "diraudit: Beginning with PID: " << getpid() << endl;
-
     // Get the directory list and output filenames from the last two arguments
     string dir_list_filename(argv[argc-2]);
     string audit_output_filename(argv[argc-1]);
@@ -110,7 +107,7 @@ uint64_t build_mask_from_args(int argc, char * argv[])
     // Options were not included, so everything will be monitored    
     if (argc == 3)
     {
-        event_types_mask = FAN_ACCESS | FAN_MODIFY |
+        event_types_mask |= FAN_ACCESS | FAN_MODIFY |
                            FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
                            FAN_OPEN | // TODO FAN_Q_OVERFLOW |
                            FAN_OPEN_PERM | FAN_ACCESS_PERM;
@@ -149,8 +146,8 @@ uint64_t build_mask_from_args(int argc, char * argv[])
                        FAN_OPEN_PERM | FAN_ACCESS_PERM;
             }
             else {
-                cerr << "diraudit: Invalid option '" << argv[i] << "'" << endl;
-                cerr << "diraudit: use diraudit --help for list of options" 
+                cerr << "dirmon: Invalid option '" << argv[i] << "'" << endl;
+                cerr << "dirmon: use diraudit --help for list of options" 
                      << endl;
                 exit(1);
             }
