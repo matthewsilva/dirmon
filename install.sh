@@ -20,6 +20,12 @@ cp ./dirmon_service.sh /etc/dirmon/
 cp ./dirmon_cron /etc/cron.d/
 echo "Dirmon 'service' installed"
 echo
+echo "Cleaning up files..."
+rm -f ./dirmon
+rm -f ./dirmon_service.sh
+rm -f ./dirmon_cron
+echo "Files cleaned up"
+echo
 echo "Write each directory you would like to monitor into"
 echo "/etc/dirmon/monitored_directories , one per line"
 echo
