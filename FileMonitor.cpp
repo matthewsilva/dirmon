@@ -1,30 +1,3 @@
-/* 
-File Audit System
-
-Description
-Create file monitoring software that will log file access to configured 
-    directories on the system.
-Requirements
- Software must be easily installed and configured
- Software must monitor configured directories for file access
-o Auditing must run from OS startup to shutdown
-o Audit must be written to text file on local system
-o Text file must contain
- Timestamp
- User
- Process ID
- Access Type
-Technical Requirements
-Show off the way you code
-Pick an object-oriented language
-Upload your source to a public source repository or provide the 
-    full source by a different means
-Include any notes or thoughts on the project
-*/
-
-// TODO cron ?
-// TODO install dirmon binary in $PATH ?
-
 #include <bits/stdc++.h> 
 #include <ctime>
 #include <fcntl.h>
@@ -45,7 +18,7 @@ using namespace std;
 
 const size_t max_mem_bytes = 4096;
 
-// Build the bitmask for the event types the user would like to audit
+// Builds the bitmask for the event types the user would like to audit
 uint64_t build_mask_from_args(int argc, char * argv[]);
 
 int main(int argc, char * argv[])
@@ -85,12 +58,14 @@ int main(int argc, char * argv[])
     string dir_list_filename(argv[argc-2]);
     string audit_output_filename(argv[argc-1]);
     
-    
-    // TODO Directory auditor should actually take dirs.txt because it needs to
-    // mark dirs.txt and update other marks anytime that dirs.txt changes
+    // Get an instance of the singleton DirectoryListAuditor
     DirectoryListAuditor * auditor = DirectoryListAuditor::get_instance();
+
+    // Prepare the auditor to be ready for recording the mask's event types
+    // for the given directory list of directories to the output file given    
     auditor->initialize(event_types_mask, dir_list_filename,
                         audit_output_filename);
+
     // Continuously audit to the configured audit output file 
     // for configured activities within the configured
     // directories (the program will never return from this call, and
@@ -109,7 +84,7 @@ uint64_t build_mask_from_args(int argc, char * argv[])
     {
         event_types_mask |= FAN_ACCESS | FAN_MODIFY |
                            FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
-                           FAN_OPEN | // TODO FAN_Q_OVERFLOW |
+                           FAN_OPEN |
                            FAN_OPEN_PERM | FAN_ACCESS_PERM;
     }
     // Options were included, so they need to be parsed    

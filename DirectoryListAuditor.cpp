@@ -20,7 +20,10 @@ DirectoryListAuditor* DirectoryListAuditor::get_instance()
 }
 
 // TODO Pass in an error_stream that would allow us to write to cerr or
-//      a file depending on whether we are using a terminal or the service
+//          a file depending on whether we are using a terminal or the service
+// TODO Directory auditor should separately mark audit_output_filename
+//          because it needs to update other marks anytime that the user
+//          decides to add or remove something from the list of files    
 //  Initialize the singleton instance to be ready to start auditing the given
 //  event types for the given directories to the given output file.
 //  DirectoryListAuditor is ready to call DirectoryListAuditor::audit_activity() 
@@ -111,21 +114,16 @@ void DirectoryListAuditor::audit_activity(const size_t event_buf_size)
              FAN_EVENT_OK(event,num_bytes_read); 
              event = FAN_EVENT_NEXT(event,num_bytes_read))
         {
-            // TODO maybe move this into separate for loop above to prevent
-            // deadlock in case the user wants to monitory a file tree
-            // containing the monitoring software, but also, we 
-            // should consider that we should never mark the 
-            // output file...
+            // Send the permission event response if required
             if(requires_permission_response(event->mask))
             {
                 send_permission_response(event->fd, fanotify_fd);
             }
-            // If we have the same PID as the editing process, it means
-            // we should skip this event, and write nothing to the audit
-            // file (if we write to the audit file, it will cause an infinite
-            // feedback loop of repeated file access and auditing). We should
-            // also skip this event if it is generated for the audit output
-            // file TODO            
+            // If we have the same PID as the auditing process, it means
+            // we should skip this event, We should also skip this event 
+            // if it is generated for the audit output file iself because
+            // if we write to the audit file, it will cause an infinite
+            // feedback loop of repeated file access and auditing 
             if (event->pid == getpid() || 
                 get_filepath_from_fd(event->fd) == output_filename) 
             { 
@@ -136,7 +134,9 @@ void DirectoryListAuditor::audit_activity(const size_t event_buf_size)
         }
     }
 }
-
+// TODO A good addition would be to have two signal handlers,
+//      one for SIGINT that just interrupts the audit_activity loop,
+//      and another for SIGTERM that also performs cleanup
 // Handle a signal by cleaning up the class and then exiting
 void DirectoryListAuditor::signal_handler(int signal_number)
 {
@@ -230,6 +230,64 @@ void DirectoryListAuditor::mark_directories(int fanotify_fd,
     }
 }
 
+// Determine whether the fanotify_mark bitmask requires a permission response
+// NOTE: Argument is an unsigned long long because __aligned is not allowed
+bool DirectoryListAuditor::requires_permission_response(unsigned long long mask)
+{
+    if ((mask & FAN_ACCESS_PERM) || (mask & FAN_OPEN_PERM))
+    {
+        return true;
+    }
+    return false;
+}
+
+// Send an fantofiy_response for the given event to the given fanotify
+// file descriptor (so that it can access the file it wants to access 
+void DirectoryListAuditor::send_permission_response(int event_fd, 
+                                                    int fanotify_fd)
+{
+    struct fanotify_response permission_event_response;
+    permission_event_response.fd = event_fd;
+    // TODO create option to map directories to yes/no access
+    // Best approach would probably be to start with the full path of the file
+    // and cut down the path one directory at a time until we reach the
+    // directory from the directory list, and then checking the mapping on that
+    // for yes/no access.
+    permission_event_response.response = FAN_ALLOW;
+    write (fanotify_fd, &permission_event_response, 
+           sizeof(struct fanotify_response));
+}
+
+// Process the given event into a line of information including filepath,
+// time of access, username of accessing process, pid of accessing process,
+// and type of access. Write this line of info to the given audit output file 
+void DirectoryListAuditor::write_event(struct fanotify_event_metadata * event,
+                                       ofstream& audit_output_file)
+{
+    string event_str = "";
+    // Get the filename of the file descriptor accessed
+    event_str += get_filepath_from_fd(event->fd) + ",";
+
+    // Get the time and date in UTC and add it to the string
+    event_str += get_UTC_time_date() + ",";
+    
+    // Get the username of the process and add it to the string
+    event_str += get_user_of_pid(event->pid) + ",";
+    
+    // Put the pid of the accessing process into the string
+    event_str += to_string(event->pid) + ",";
+    
+    // Create string of access types to file
+    event_str += access_type_mask_to_string(event->mask) + ",";
+    
+    // Write the string of info to the output file
+    audit_output_file << event_str << endl;
+    
+    // Flush output to the output file to be sure that the info is actually
+    // written
+    audit_output_file.flush();
+}
+
 // Return the filepath that the given open file descriptor corresponds to
 string DirectoryListAuditor::get_filepath_from_fd(int fd)
 {
@@ -294,34 +352,6 @@ string DirectoryListAuditor::get_user_of_pid(pid_t pid)
     }
 }
 
-// Determine whether the fanotify_mark bitmask requires a permission response
-// NOTE: Argument is an unsigned long long because __aligned is not allowed
-bool DirectoryListAuditor::requires_permission_response(unsigned long long mask)
-{
-    if ((mask & FAN_ACCESS_PERM) || (mask & FAN_OPEN_PERM))
-    {
-        return true;
-    }
-    return false;
-}
-
-// Send an fantofiy_response for the given event to the given fanotify
-// file descriptor (so that it can access the file it wants to access 
-void DirectoryListAuditor::send_permission_response(int event_fd, 
-                                                    int fanotify_fd)
-{
-    struct fanotify_response permission_event_response;
-    permission_event_response.fd = event_fd;
-    // TODO create option to map directories to yes/no access
-    // Best approach would probably be to start with the full path of the file
-    // and cut down the path one directory at a time until we reach the
-    // directory from the directory list, and then checking the mapping on that
-    // for yes/no access
-    permission_event_response.response = FAN_ALLOW;
-    write (fanotify_fd, &permission_event_response, 
-           sizeof(struct fanotify_response));
-}
-
 // Given an fanotify_mark access type mask, generate a string representing
 // the different access types found
 // Argument is an unsigned long long because __aligned is not allowed
@@ -370,36 +400,6 @@ string DirectoryListAuditor::access_type_mask_to_string(unsigned long long mask)
         access_string += ")";
     }
     return access_string;
-}
-
-// Process the given event into a line of information including filepath,
-// time of access, username of accessing process, pid of accessing process,
-// and type of access. Write this line of info to the given audit output file 
-void DirectoryListAuditor::write_event(struct fanotify_event_metadata * event,
-                                       ofstream& audit_output_file)
-{
-    string event_str = "";
-    // Get the filename of the file descriptor accessed
-    event_str += get_filepath_from_fd(event->fd) + ",";
-
-    // Get the time and date in UTC and add it to the string
-    event_str += get_UTC_time_date() + ",";
-    
-    // Get the username of the process and add it to the string
-    event_str += get_user_of_pid(event->pid) + ",";
-    
-    // Put the pid of the accessing process into the string
-    event_str += to_string(event->pid) + ",";
-    
-    // Create string of access types to file
-    event_str += access_type_mask_to_string(event->mask) + ",";
-    
-    // Write the string of info to the output file
-    audit_output_file << event_str << endl;
-    
-    // Flush output to the output file to be sure that the info is actually
-    // written
-    audit_output_file.flush();
 }
 
 // Open an fstream safely, exiting with an appropriate error message
