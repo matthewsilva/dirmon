@@ -17,7 +17,7 @@ echo "Installing dirmon 'service'..."
 mkdir /etc/dirmon
 touch /etc/dirmon/monitored_directories
 touch /etc/dirmon/audit_file
-chmod 777 ./dirmon_services.sh
+chmod 777 ./dirmon_service.sh
 cp ./dirmon_service.sh /etc/dirmon/
 # permissions 600 required for jobs in cron.d
 chmod 600 ./dirmon
