@@ -1,0 +1,1 @@
+sudo dirmon /etc/dirmon/monitored_directories /etc/dirmon/audit_file
