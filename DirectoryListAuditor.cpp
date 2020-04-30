@@ -208,23 +208,24 @@ string DirectoryListAuditor::access_type_mask_to_string(unsigned long long mask)
 void DirectoryListAuditor::write_event(struct fanotify_event_metadata * event,
                                        ofstream& audit_output_file)
 {
+    string event_str = "";
     // Get the filename of the file descriptor accessed
-    audit_output_file << get_filepath_from_fd(event->fd) << ",";
+    event_str += get_filepath_from_fd(event->fd) + ",";
 
     // Get the time and date in UTC and add it to the audit file
-    audit_output_file << get_UTC_time_date() << ",";
+    event_str += get_UTC_time_date() + ",";
     
     // Get the username of the process and add it to the audit file
-    audit_output_file << get_user_of_pid(event->pid) << ",";
+    event_str += get_user_of_pid(event->pid) + ",";
     
     // Put the pid of the accessing process into the audit file
-    audit_output_file << event->pid << ",";
+    event_str += to_string(event->pid) + ",";
     
     // Create string of access types to file
     // TODO break out into a function that takes a mask & rets a string
-    audit_output_file << access_type_mask_to_string(event->mask) << ",";
+    event_str += access_type_mask_to_string(event->mask) + ",";
     
-    audit_output_file << endl;
+    audit_output_file << event_str << endl;
     
     audit_output_file.flush();
 }
@@ -280,7 +281,7 @@ void DirectoryListAuditor::initialize(uint64_t event_types_mask,
                                       string dir_list_filename,
                                       string audit_output_filename)
 {
-    // Create a signal handler to catch an interrupt signal     
+    // Create a signal handler to catch the SIGTERM shutdown signal signal     
     signal(SIGINT, signal_handler); //TODO if these are in separate objects, maybe we
                                     // have the directory list as a class data member
                                     // such that both classes can handle the signal
