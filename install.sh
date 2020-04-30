@@ -1,5 +1,13 @@
 #!/bin/sh
 
+echo "Downloading files..."
+echo
+wget https://github.com/matthewsilva/dirmon/raw/master/bins/dirmon
+wget https://raw.githubusercontent.com/matthewsilva/dirmon/master/dirmon_cron
+wget https://raw.githubusercontent.com/matthewsilva/dirmon/master/dirmon_service.sh
+echo
+echo "Finished donwloading"
+echo
 echo "Installing dirmon...."
 cp ./dirmon /usr/bin/
 echo "Dirmon installed"
