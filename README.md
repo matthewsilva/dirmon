@@ -22,9 +22,17 @@ You'll need to restart your system to begin monitoring (because dirmon is now se
 
 Enter each directory you would like to monitor into /etc/dirmon/monitored_directories , one per line
 
+![](readme_images/access.png)
+
+Fig 1. Accessing files in a monitored directory
+
 # Viewing File Access Events
 
 See the result of your auditing in /etc/dirmon/audit_file (feel free to remove this file if you want to clear out old info)
+
+![](readme_images/audit.png)
+
+Fig 2. Viewing audited file accesses for the monitored directory
 
 # Dirmon Options
 
