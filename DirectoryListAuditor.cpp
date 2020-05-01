@@ -19,9 +19,11 @@ DirectoryListAuditor* DirectoryListAuditor::get_instance()
     return instance;
 }
 
-// TODO Pass in an error_stream that would allow us to write to cerr or
+// TODO Possible Improvement:
+//      Pass in an error_stream that would allow us to write to cerr or
 //          a file depending on whether we are using a terminal or the service
-// TODO Directory auditor should separately mark audit_output_filename
+// TODO Possible Improvement:
+//      Directory auditor should separately mark audit_output_filename
 //          because it needs to update other marks anytime that the user
 //          decides to add or remove something from the list of files    
 //  Initialize the singleton instance to be ready to start auditing the given
@@ -58,7 +60,6 @@ void DirectoryListAuditor::initialize(uint64_t event_types_mask,
     // Create or append to given audit output file
     audit_output_file = ofstream(audit_output_filename, 
                                ofstream::out | ofstream::app);
-    // TODO
     output_filename = audit_output_filename;
 
     // We want to add the marked directories as recursively monitored mounts
@@ -100,7 +101,9 @@ void DirectoryListAuditor::audit_activity(const size_t event_buf_size)
     // Loop until program is terminated externally
     for (;;)
     {
-        // TODO What is the behavior of read when the return is equal to the buffer size?    
+        // TODO Possible Improvement 
+        //      What is the behavior of read when the return is equal to 
+        //          the buffer size?    
         num_bytes_read = read(fanotify_fd, events, event_buf_size);
         cout << "audit_activity(...): num_bytes_read == " << num_bytes_read << endl;
         if (num_bytes_read == -1)
@@ -134,9 +137,10 @@ void DirectoryListAuditor::audit_activity(const size_t event_buf_size)
         }
     }
 }
-// TODO A good addition would be to have two signal handlers,
-//      one for SIGINT that just interrupts the audit_activity loop,
-//      and another for SIGTERM that also performs cleanup
+// TODO Possible improvement:
+//      Have two signal handlers, one for SIGINT that just 
+//          interrupts the audit_activity loop, and another 
+//          for SIGTERM that also performs cleanup
 // Handle a signal by cleaning up the class and then exiting
 void DirectoryListAuditor::signal_handler(int signal_number)
 {
@@ -248,11 +252,12 @@ void DirectoryListAuditor::send_permission_response(int event_fd,
 {
     struct fanotify_response permission_event_response;
     permission_event_response.fd = event_fd;
-    // TODO create option to map directories to yes/no access
-    // Best approach would probably be to start with the full path of the file
-    // and cut down the path one directory at a time until we reach the
-    // directory from the directory list, and then checking the mapping on that
-    // for yes/no access.
+    // TODO Possible Imrovement:
+    // Create option to map directories to yes/no access.
+    //  Best approach would probably be to start with the full path of the file
+    //  and cut down the path one directory at a time until we reach the
+    //  directory from the directory list, and then checking the mapping on that
+    //  for yes/no access.
     permission_event_response.response = FAN_ALLOW;
     write (fanotify_fd, &permission_event_response, 
            sizeof(struct fanotify_response));

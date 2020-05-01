@@ -117,7 +117,7 @@ uint64_t build_mask_from_args(int argc, char * argv[])
             else if (current_arg == "--ALL") {
                 event_types_mask |= FAN_ACCESS | FAN_MODIFY |
                        FAN_CLOSE_WRITE | FAN_CLOSE_NOWRITE |
-                       FAN_OPEN | // TODO FAN_Q_OVERFLOW |
+                       FAN_OPEN | // TODO Possible Improvement: FAN_Q_OVERFLOW |
                        FAN_OPEN_PERM | FAN_ACCESS_PERM;
             }
             else {
