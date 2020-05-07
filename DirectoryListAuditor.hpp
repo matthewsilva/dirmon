@@ -79,6 +79,10 @@ class DirectoryListAuditor
         // Return:  void
         static void signal_handler(int signal_number);
 
+        // TODO Possible Improvement:
+        //      Public methods for changing the directory list file
+        //      could be useful
+
     private:
         // The fanotify file descriptor for the singleton
         int fanotify_fd;
@@ -199,14 +203,12 @@ class DirectoryListAuditor
         void mount_directories(set<string> directories);
 
         // Intro:   Cleans up the changed system state created in initialize
-        //              (e.g. unmounts all directories)         
+        //              (e.g. unmounts all directories)  
         // Inputs:  None
         // Outputs: None
         // Return:  void
         void clean_up();
 
-        
-    
 };
 
 #endif

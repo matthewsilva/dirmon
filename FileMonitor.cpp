@@ -1,3 +1,4 @@
+// TODO Can probably remove many of these includes
 #include <bits/stdc++.h> 
 #include <ctime>
 #include <fcntl.h>
@@ -16,6 +17,7 @@
 
 using namespace std;
 
+// TODO It would be best to make this user-configurable with an argument
 const size_t max_mem_bytes = 4096;
 
 // Builds the bitmask for the event types the user would like to audit
@@ -23,6 +25,9 @@ uint64_t build_mask_from_args(int argc, char * argv[]);
 
 int main(int argc, char * argv[])
 {
+    // TODO Code Review Discussion Point:
+    //      Could expand on what the contents of DIRECTORY_LIST_FILE should
+    //      look like, but that would be better placed in a man page for dirmon 
     if (argc == 2 && (string(argv[1]) == "--help" || string(argv[1]) == "-h"))
     {
         cout << "Usage: dirmon [OPTION]... DIRECTORY_LIST_FILE AUDIT_OUTPUT_FILENAME" << endl;
@@ -61,10 +66,55 @@ int main(int argc, char * argv[])
     // Get an instance of the singleton DirectoryListAuditor
     DirectoryListAuditor * auditor = DirectoryListAuditor::get_instance();
 
+    // TODO Code Review Discussion Point:
+    //      I would really appreciate some input on whether the logic for
+    //      turning the command line option list into an event_types_mask
+    //      should go in main or in the DirectoryListAuditor.
+    //      I see two ways to approach it.
+    //      1. The current way, we convert the arguments into a mask
+    //          in main, and pass the mask to initialize. This is good
+    //          because main should probably handle logic regarding the
+    //          translation of arguments into something useful. This
+    //          is also bad because the DirectoryListAuditor has lost
+    //          any abstraction regarding event types, and must be supplied
+    //          with an event-types mask that requires reading a man page.
+    //          However, even if there is some layer of abstraction,
+    //          you'd still have to read the man page anyway to know what
+    //          it meant.
+    //      2. Another way of doing this would be adding a set of default
+    //          boolean parameters to the initialize method, each toggling
+    //          one event type to audit. The actual mask would get built
+    //          inside the auditor. This would be okay, but to be honest,
+    //          you'd have to read the man page either way, and people are
+    //          less likely to read the man page for fanotify_mark if you
+    //          just let them toggle the options using bools.
+    //      Or maybe the options are self-explanatory and there's no real
+    //          need to read the man page in case of option 2. I'd greatly
+    //          appreciate the input!  
+
     // Prepare the auditor to be ready for recording the mask's event types
     // for the given directory list of directories to the output file given    
     auditor->initialize(event_types_mask, dir_list_filename,
                         audit_output_filename);
+
+    // TODO Code Review Discussion Point:
+    //      An alternative way of doing auditing could be a
+    //      wait_for_event() or read_event() method that would only
+    //      wait for a single event. This would give the user more control
+    //      over their process, and decide whether they want to loop ininitely
+    //      through event collection or just collect events at their own
+    //      discretion. Furthermore, it would allow them to do other
+    //      activities alongside the auditing (
+    //      e.g.
+    //      unsigned events_read = 0;
+    //      for (;;) {
+    //          auditor->read_event();
+    //          cout << "Read an event! Check " << audit_output_filename << endl;
+    //          if (events_read > 500) {
+    //              backup_to_server(audit_output_filename);
+    //              events_read = 0;
+    //          }  
+    //      }
 
     // Continuously audit to the configured audit output file 
     // for configured activities within the configured
@@ -74,6 +124,9 @@ int main(int argc, char * argv[])
     
 }
 
+// TODO Possible Improvement:
+//      Should mention in this method's documentation that fanotify_mark's
+//      man page should be referenced
 // Build the bitmask for the event types the user would like to audit
 uint64_t build_mask_from_args(int argc, char * argv[])
 {    

@@ -1,3 +1,11 @@
+// TODO Possible Improvement:
+//      This probably depends on your style guide, but
+//      Should includes for a source file go in the header or the source file?
+//      What about for overlapping includes?
+// TODO Possible Improvement:
+//      Also depends on style guide, but exceptions might be a better choice
+//      instead of error-code exits. Could allow for more versatility, either
+//      catching the exception or not, etc.
 
 #include "DirectoryListAuditor.hpp"
 
@@ -34,6 +42,8 @@ void DirectoryListAuditor::initialize(uint64_t event_types_mask,
                                       string dir_list_filename,
                                       string audit_output_filename)
 {
+    // TODO Possible Improvement:
+    //      Should change this comment to say "when the system shuts down"
     // Create a signal handler to catch the SIGTERM shutdown signal to clean
     // things up when the program ends     
     signal(SIGTERM, signal_handler); 
@@ -49,7 +59,7 @@ void DirectoryListAuditor::initialize(uint64_t event_types_mask,
     fanotify_fd = fanotify_init(monitoring_flags, event_flags);
     if (fanotify_fd == -1)
     {
-        cerr << "diraudit: cannot initialize fanotify file descriptor, errno:" 
+        cerr << "dirmon: cannot initialize fanotify file descriptor, errno:" 
              << strerror(errno) << endl;
         exit(errno);
     }
@@ -172,7 +182,7 @@ void DirectoryListAuditor::mount_directories(set<string> directories)
         // 2. fanotify has a bug in Linux Kernel 3.17 onwards (see man) where 
         //    it is only able to pick up notifications from mountpoints 
         //    through the target mount point, and not the source. 
-        //        
+        //     
         // NOTE:This has a vulnerability in that any process that is already
         //      inside the directory before this mount occurs will not have
         //      any of its accesses monitored.
@@ -181,7 +191,7 @@ void DirectoryListAuditor::mount_directories(set<string> directories)
         {
             cerr << "dirmon: cannot mount directory '" << *directory_name
                  << "'for monitoring, errno:" << strerror(errno) << endl;
-            clean_up();            
+            clean_up();
             exit(errno);
         }
     }
@@ -206,7 +216,6 @@ void DirectoryListAuditor::mark_directories(int fanotify_fd,
         if (fanotify_mark(fanotify_fd, mark_flags,
                           event_types_mask,
                           AT_FDCWD,
-                          //directory_names[i].c_str()) == -1)
                           directory_name->c_str()) == -1)
         {
             cerr << "dirmon: cannot mark pathname '" 
@@ -223,11 +232,9 @@ void DirectoryListAuditor::mark_directories(int fanotify_fd,
         if (fanotify_mark(fanotify_fd, FAN_MARK_ADD | FAN_MARK_IGNORED_MASK,
                           event_types_mask,
                           AT_FDCWD,
-                          //directory_names[i].c_str()) == -1)
                           directory_name->c_str()) == -1)
         {
             cerr << "diraudit: cannot unmark audit output file '" 
-                 //<< directory_names[i] << "'; (errno: "<<errno<<"); skipping directory..." << endl;
                  << *directory_name << "'; (errno: " 
                  << strerror(errno) << ")" << endl;
         }
@@ -456,13 +463,12 @@ void DirectoryListAuditor::clean_up() {
     for (auto monitored_directory = instance->monitored_directories.begin();
               monitored_directory != instance->monitored_directories.end(); 
               monitored_directory++)
-    //for (int i = 0; i < directory_names.size(); i++)
     {
         
         cout << "signal_handler(...): Unmounting directory '" 
              << *monitored_directory << "'" << endl;
         // Use the MNT_DETACH flag because the monitored directories
-        // are likely in usage frequently, and we should wait until
+        // are likely in use frequently, and we should wait until
         // they are not in use to unmount them 
         if (umount2(monitored_directory->c_str(), MNT_DETACH) == -1)
         {
